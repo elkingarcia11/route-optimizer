@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from main import Address, GeoPoint, _get_api_key, _location_from_address, app
+from main import Address, GeoPoint, _get_api_key, _location_from_address, _resolve_api_key, app
 from route_optimizer import Location
 
 
@@ -40,24 +40,47 @@ def _address(
     }
 
 
-class TestGetApiKey:
-    def test_returns_key_when_configured(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("ORS_API_KEY", "test-api-key")
-        assert _get_api_key() == "test-api-key"
+def _optimize_payload(
+    addresses: list[dict],
+    *,
+    api_key: str | None = "test-api-key",
+) -> dict:
+    payload: dict = {"addresses": addresses}
+    if api_key is not None:
+        payload["apiKey"] = api_key
+    return payload
+
+
+class TestResolveApiKey:
+    def test_returns_explicit_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ORS_API_KEY", raising=False)
+        assert _resolve_api_key("payload-key") == "payload-key"
+
+    def test_returns_env_when_explicit_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ORS_API_KEY", "env-key")
+        assert _resolve_api_key(None) == "env-key"
+        assert _get_api_key() == "env-key"
+
+    def test_explicit_key_overrides_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ORS_API_KEY", "env-key")
+        assert _resolve_api_key("payload-key") == "payload-key"
 
     def test_raises_when_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("ORS_API_KEY", raising=False)
         with pytest.raises(HTTPException) as exc_info:
-            _get_api_key()
-        assert exc_info.value.status_code == 500
-        assert exc_info.value.detail == "ORS_API_KEY is not configured."
+            _resolve_api_key(None)
+        assert exc_info.value.status_code == 422
+        assert exc_info.value.detail == (
+            "apiKey is required in the request body or via ORS_API_KEY."
+        )
 
-    def test_raises_when_empty_string(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_raises_when_empty_strings(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ORS_API_KEY", "")
         with pytest.raises(HTTPException) as exc_info:
-            _get_api_key()
-        assert exc_info.value.status_code == 500
-        assert exc_info.value.detail == "ORS_API_KEY is not configured."
+            _resolve_api_key("  ")
+        assert exc_info.value.status_code == 422
 
 
 class TestLocationFromAddress:
@@ -130,7 +153,7 @@ class TestOpenApiDocs:
         optimize_post = schema["paths"]["/optimize"]["post"]
         assert optimize_post["summary"] == "Optimize route order"
         assert "422" in optimize_post["responses"]
-        assert "OptimizeRequest" in schema["components"]["schemas"]
+        assert "apiKey" in schema["components"]["schemas"]["OptimizeRequest"]["properties"]
         assert "OptimizeResponse" in schema["components"]["schemas"]
 
 
@@ -142,31 +165,35 @@ class TestOptimizeEndpoint:
         _address(-73.8955, 40.8515, address1="End", city="Bronx", state="NY"),
     ]
 
-    def test_returns_500_when_api_key_missing(
+    def test_returns_422_when_api_key_missing(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("ORS_API_KEY", raising=False)
-        response = client.post("/optimize", json={"addresses": self.ADDRESSES})
-        assert response.status_code == 500
-        assert response.json()["detail"] == "ORS_API_KEY is not configured."
+        response = client.post(
+            "/optimize", json=_optimize_payload(self.ADDRESSES, api_key=None)
+        )
+        assert response.status_code == 422
+        assert response.json()["detail"] == (
+            "apiKey is required in the request body or via ORS_API_KEY."
+        )
 
     def test_returns_422_for_invalid_location(self, client: TestClient) -> None:
         response = client.post(
             "/optimize",
-            json={
-                "addresses": [
+            json=_optimize_payload(
+                [
                     self.ADDRESSES[0],
                     {"location": {"type": "Point", "coordinates": [-73.91335]}},
                     self.ADDRESSES[-1],
                 ]
-            },
+            ),
         )
         assert response.status_code == 422
 
     def test_returns_422_when_too_few_addresses(self, client: TestClient) -> None:
         response = client.post(
             "/optimize",
-            json={"addresses": [self.ADDRESSES[0]]},
+            json=_optimize_payload([self.ADDRESSES[0]], api_key=None),
         )
         assert response.status_code == 422
 
@@ -183,7 +210,10 @@ class TestOptimizeEndpoint:
             "total_distance_meters": 12345,
         }
 
-        response = client.post("/optimize", json={"addresses": self.ADDRESSES})
+        response = client.post(
+            "/optimize",
+            json=_optimize_payload(self.ADDRESSES, api_key="test-api-key"),
+        )
 
         assert response.status_code == 200
         body = response.json()
@@ -239,18 +269,76 @@ class TestOptimizeEndpoint:
         monkeypatch.setenv("ORS_API_KEY", "test-api-key")
         mock_optimize_route.side_effect = RuntimeError("No solution found.")
 
-        response = client.post("/optimize", json={"addresses": self.ADDRESSES})
+        response = client.post(
+            "/optimize",
+            json=_optimize_payload(self.ADDRESSES, api_key="test-api-key"),
+        )
 
         assert response.status_code == 502
         assert response.json()["detail"] == "No solution found."
 
-    def test_returns_500_when_api_key_empty_string(
+    def test_returns_422_when_api_key_empty_in_payload_and_env(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv("ORS_API_KEY", "")
-        response = client.post("/optimize", json={"addresses": self.ADDRESSES})
-        assert response.status_code == 500
-        assert response.json()["detail"] == "ORS_API_KEY is not configured."
+        monkeypatch.delenv("ORS_API_KEY", raising=False)
+        response = client.post(
+            "/optimize",
+            json=_optimize_payload(self.ADDRESSES, api_key=None),
+        )
+        assert response.status_code == 422
+        assert response.json()["detail"] == (
+            "apiKey is required in the request body or via ORS_API_KEY."
+        )
+
+    @patch("main.optimize_route")
+    def test_uses_api_key_from_payload_without_env(
+        self,
+        mock_optimize_route,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("ORS_API_KEY", raising=False)
+        mock_optimize_route.return_value = {
+            "ordered_indices": [0, 1],
+            "total_distance_meters": 1000,
+        }
+        addresses = [
+            _address(-73.8955, 40.8515, address1="Start"),
+            _address(-73.90774, 40.88467, address1="End"),
+        ]
+
+        response = client.post(
+            "/optimize",
+            json=_optimize_payload(addresses, api_key="payload-only-key"),
+        )
+
+        assert response.status_code == 200
+        assert mock_optimize_route.call_args.kwargs["api_key"] == "payload-only-key"
+
+    @patch("main.optimize_route")
+    def test_payload_api_key_overrides_env(
+        self,
+        mock_optimize_route,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("ORS_API_KEY", "env-key")
+        mock_optimize_route.return_value = {
+            "ordered_indices": [0, 1],
+            "total_distance_meters": 1000,
+        }
+        addresses = [
+            _address(-73.8955, 40.8515, address1="Start"),
+            _address(-73.90774, 40.88467, address1="End"),
+        ]
+
+        response = client.post(
+            "/optimize",
+            json=_optimize_payload(addresses, api_key="payload-key"),
+        )
+
+        assert response.status_code == 200
+        assert mock_optimize_route.call_args.kwargs["api_key"] == "payload-key"
 
     def test_returns_422_when_addresses_key_missing(self, client: TestClient) -> None:
         response = client.post("/optimize", json={})
@@ -269,20 +357,20 @@ class TestOptimizeEndpoint:
     def test_returns_422_for_non_numeric_coordinates(self, client: TestClient) -> None:
         response = client.post(
             "/optimize",
-            json={
-                "addresses": [
+            json=_optimize_payload(
+                [
                     {"location": {"type": "Point", "coordinates": ["a", "b"]}},
                     self.ADDRESSES[-1],
                 ]
-            },
+            ),
         )
         assert response.status_code == 422
 
     def test_returns_422_for_location_with_three_values(self, client: TestClient) -> None:
         response = client.post(
             "/optimize",
-            json={
-                "addresses": [
+            json=_optimize_payload(
+                [
                     self.ADDRESSES[0],
                     {
                         "location": {
@@ -292,7 +380,7 @@ class TestOptimizeEndpoint:
                     },
                     self.ADDRESSES[-1],
                 ]
-            },
+            ),
         )
         assert response.status_code == 422
 
@@ -321,7 +409,7 @@ class TestOptimizeEndpoint:
             "total_distance_meters": 5000,
         }
 
-        response = client.post("/optimize", json={"addresses": addresses})
+        response = client.post("/optimize", json=_optimize_payload(addresses))
 
         assert response.status_code == 200
         body = response.json()
@@ -346,7 +434,10 @@ class TestOptimizeEndpoint:
             "No route found between location 0 and 2."
         )
 
-        response = client.post("/optimize", json={"addresses": self.ADDRESSES})
+        response = client.post(
+            "/optimize",
+            json=_optimize_payload(self.ADDRESSES, api_key="test-api-key"),
+        )
 
         assert response.status_code == 502
         assert response.json()["detail"] == "No route found between location 0 and 2."
@@ -369,7 +460,7 @@ class TestOptimizeEndpoint:
             "total_distance_meters": 999999,
         }
 
-        response = client.post("/optimize", json={"addresses": addresses})
+        response = client.post("/optimize", json=_optimize_payload(addresses))
 
         assert response.status_code == 200
         body = response.json()
@@ -401,7 +492,7 @@ class TestOptimizeEndpoint:
             "total_distance_meters": 1000,
         }
 
-        response = client.post("/optimize", json={"addresses": addresses})
+        response = client.post("/optimize", json=_optimize_payload(addresses))
 
         assert response.status_code == 200
         assert response.json()["addresses"][0]["verification"] == {
@@ -412,12 +503,12 @@ class TestOptimizeEndpoint:
     def test_returns_422_when_location_missing(self, client: TestClient) -> None:
         response = client.post(
             "/optimize",
-            json={
-                "addresses": [
+            json=_optimize_payload(
+                [
                     {"address1": "Start", "city": "Bronx"},
                     self.ADDRESSES[-1],
                 ]
-            },
+            ),
         )
         assert response.status_code == 422
 
@@ -455,7 +546,7 @@ class TestOptimizeEndpoint:
             "total_distance_meters": 1000,
         }
 
-        response = client.post("/optimize", json={"addresses": addresses})
+        response = client.post("/optimize", json=_optimize_payload(addresses))
 
         assert response.status_code == 200
         addr = response.json()["addresses"][0]

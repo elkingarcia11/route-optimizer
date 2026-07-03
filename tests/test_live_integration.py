@@ -128,7 +128,7 @@ class TestLiveHttpApi:
         client = TestClient(app)
         response = client.post(
             "/optimize",
-            json={"addresses": MINIMAL_ADDRESSES},
+            json={"addresses": MINIMAL_ADDRESSES, "apiKey": api_key},
         )
 
         assert response.status_code == 200
@@ -161,7 +161,10 @@ class TestLiveHttpApi:
         ]
 
         client = TestClient(app)
-        response = client.post("/optimize", json={"addresses": addresses})
+        response = client.post(
+            "/optimize",
+            json={"addresses": addresses, "apiKey": api_key},
+        )
 
         assert response.status_code == 200
         body = response.json()

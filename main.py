@@ -148,16 +148,27 @@ class OptimizeRequest(BaseModel):
         json_schema_extra={
             "examples": [
                 {
+                    "apiKey": "your_openrouteservice_api_key",
                     "addresses": [
                         EXAMPLE_ADDRESS_START,
                         EXAMPLE_ADDRESS_STOP,
                         EXAMPLE_ADDRESS_END,
-                    ]
+                    ],
                 }
             ]
         }
     )
 
+    apiKey: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "OpenRouteService API key for this request. "
+            "Use this to rotate keys without redeploying. "
+            "Falls back to `ORS_API_KEY` when omitted."
+        ),
+        examples=["your_openrouteservice_api_key"],
+    )
     addresses: list[Address] = Field(
         ...,
         min_length=2,
@@ -208,14 +219,18 @@ class ErrorResponse(BaseModel):
     detail: str = Field(..., description="Error message.")
 
 
-def _get_api_key() -> str:
-    api_key = os.environ.get("ORS_API_KEY")
+def _resolve_api_key(explicit_key: str | None = None) -> str:
+    api_key = (explicit_key or "").strip() or os.environ.get("ORS_API_KEY", "").strip()
     if not api_key:
         raise HTTPException(
-            status_code=500,
-            detail="ORS_API_KEY is not configured.",
+            status_code=422,
+            detail="apiKey is required in the request body or via ORS_API_KEY.",
         )
     return api_key
+
+
+# Backward-compatible alias for tests
+_get_api_key = _resolve_api_key
 
 
 def _location_from_address(address: Address) -> Location:
@@ -266,6 +281,8 @@ def health() -> HealthResponse:
         "Accepts a list of `core.Address`-compatible objects and returns the "
         "same addresses in optimized visit order with `routeOrder` and "
         "`totalDistanceMeters`.\n\n"
+        "Pass `apiKey` in the request body to supply or rotate OpenRouteService "
+        "keys per request.\n\n"
         "Routing uses OpenRouteService road distances and OR-Tools."
     ),
     responses={
@@ -275,7 +292,7 @@ def health() -> HealthResponse:
         },
         500: {
             "model": ErrorResponse,
-            "description": "OpenRouteService API key is not configured.",
+            "description": "Unexpected server error.",
         },
         502: {
             "model": ErrorResponse,
@@ -298,7 +315,7 @@ def optimize(request: OptimizeRequest) -> OptimizeResponse:
             start,
             stops,
             end,
-            api_key=_get_api_key(),
+            api_key=_resolve_api_key(request.apiKey),
             profile=DEFAULT_PROFILE,
             time_limit_seconds=DEFAULT_TIME_LIMIT_SECONDS,
         )

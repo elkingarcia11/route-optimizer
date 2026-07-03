@@ -43,6 +43,21 @@ pip install -r requirements.txt
 
 ## API key
 
+### HTTP API
+
+Pass `apiKey` in each `POST /optimize` request body. This lets callers rotate keys when one expires or hits its limit without redeploying:
+
+```json
+{
+  "apiKey": "your_openrouteservice_api_key",
+  "addresses": [...]
+}
+```
+
+If `apiKey` is omitted, the service falls back to the `ORS_API_KEY` environment variable.
+
+### CLI and local development
+
 ```bash
 cp .env.example .env
 ```
@@ -53,7 +68,7 @@ Edit `.env`:
 ORS_API_KEY=your_actual_api_key
 ```
 
-The CLI loads `.env` automatically. For Docker, pass the key with `--env-file .env` or `-e ORS_API_KEY=...`.
+The CLI loads `.env` automatically. For Docker without per-request keys, pass the env var with `--env-file .env` or `-e ORS_API_KEY=...`.
 
 ---
 
@@ -105,10 +120,14 @@ Response addresses include all input fields plus `routeOrder` (1-based visit pos
 
 ### Request — `POST /optimize`
 
-Send a list of `Address` objects. First = start, last = end, middle = stops.
+| Field | Type | Description |
+|---|---|---|
+| `apiKey` | string | OpenRouteService API key (preferred; rotates per request) |
+| `addresses` | array | Ordered list of addresses — first is start, last is end |
 
 ```json
 {
+  "apiKey": "your_openrouteservice_api_key",
   "addresses": [
     {
       "address1": "2249 Washington Ave",
@@ -184,6 +203,7 @@ Optional address fields: `address2`, `apartment`, `country`, and `verification` 
 curl -X POST http://localhost:8000/optimize \
   -H "Content-Type: application/json" \
   -d '{
+    "apiKey": "your_openrouteservice_api_key",
     "addresses": [
       {"address1": "Start", "location": {"type": "Point", "coordinates": [-73.8955, 40.8515]}},
       {"address1": "Stop", "location": {"type": "Point", "coordinates": [-73.91335, 40.87995]}},
@@ -198,14 +218,14 @@ curl -X POST http://localhost:8000/optimize \
 POST http://route-optimizer:8000/optimize
 Content-Type: application/json
 
-{"addresses": [{...core.Address...}, ...]}
+{"apiKey": "...", "addresses": [{...core.Address...}, ...]}
 ```
 
 Optional container env vars:
 
 | Variable | Default | Description |
 |---|---|---|
-| `ORS_API_KEY` | — | OpenRouteService API key (required) |
+| `ORS_API_KEY` | — | Fallback OpenRouteService API key when `apiKey` is omitted |
 | `ROUTE_OPTIMIZER_PROFILE` | `driving-car` | ORS travel profile |
 | `ROUTE_OPTIMIZER_TIME_LIMIT` | `5` | OR-Tools solver time limit (seconds) |
 
