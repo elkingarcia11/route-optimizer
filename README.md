@@ -2,14 +2,24 @@
 
 Reorder a list of stops to minimize total travel distance on real roads, with a fixed start and end point.
 
-Given coordinates for a **start**, several **stops**, and an **end**, the script finds the best order to visit every stop exactly once while keeping the start and end fixed.
+Given coordinates for a **start**, several **stops**, and an **end**, the service finds the best order to visit every stop exactly once while keeping the start and end fixed.
 
 ## How it works
 
 1. **OpenRouteService** builds a road distance matrix (meters) between all locations.
 2. **Google OR-Tools** solves the routing problem and returns the optimized visit order.
 
-Distances are based on actual road networks, not straight-line (haversine) distance.
+Distances are based on actual road networks, not straight-line distance.
+
+## Project layout
+
+| File | Purpose |
+|---|---|
+| `main.py` | FastAPI HTTP service (Docker entrypoint) |
+| `route_optimizer.py` | Core optimizer + CLI |
+| `route.json` | Example CLI input with addresses |
+| `Dockerfile` | Container image for the HTTP API |
+| `.env` | OpenRouteService API key (not committed) |
 
 ## Requirements
 
@@ -19,7 +29,7 @@ Distances are based on actual road networks, not straight-line (haversine) dista
 ## Installation
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/elkingarcia11/route-optimizer.git
 cd route-optimizer
 
 python3 -m venv .venv
@@ -28,8 +38,6 @@ pip install -r requirements.txt
 ```
 
 ## API key
-
-Copy the example env file and add your key:
 
 ```bash
 cp .env.example .env
@@ -41,9 +49,105 @@ Edit `.env`:
 ORS_API_KEY=your_actual_api_key
 ```
 
-The script loads this automatically. You can also pass `--api-key` or set the `ORS_API_KEY` environment variable directly.
+The CLI loads `.env` automatically. For Docker, pass the key with `--env-file .env` or `-e ORS_API_KEY=...`.
 
-## Usage
+---
+
+## HTTP API (Docker)
+
+Build and run on port 8000:
+
+```bash
+docker build -t route-optimizer .
+docker run --rm -p 8000:8000 --name route-optimizer --env-file .env route-optimizer
+```
+
+On a shared Docker network, other services (e.g. a Go API) reach it at:
+
+```
+http://route-optimizer:8000/optimize
+```
+
+Set `ROUTE_OPTIMIZER_URL` in the caller if the host differs.
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/health` | GET | Health check |
+| `/optimize` | POST | Optimize route (Go-compatible) |
+| `/docs` | GET | Swagger UI |
+
+### Request — `POST /optimize`
+
+Each location is **`[longitude, latitude]`**. First = start, last = end, middle = stops.
+
+```json
+{
+  "locations": [
+    [-73.8955, 40.8515],
+    [-73.91335, 40.87995],
+    [-73.90774, 40.88467],
+    [-73.90478, 40.83256],
+    [-73.8955, 40.8515]
+  ]
+}
+```
+
+### Response
+
+```json
+{
+  "routeIndexes": [0, 3, 2, 1, 4],
+  "totalDistanceMeters": 21220,
+  "orderedLocations": [
+    [-73.8955, 40.8515],
+    [-73.90478, 40.83256],
+    [-73.90774, 40.88467],
+    [-73.91335, 40.87995],
+    [-73.8955, 40.8515]
+  ]
+}
+```
+
+| Field | Description |
+|---|---|
+| `routeIndexes` | Indices into the input `locations` array, in visit order |
+| `totalDistanceMeters` | Total road distance for the optimized route |
+| `orderedLocations` | `[lon, lat]` pairs in optimized visit order |
+
+### curl example
+
+```bash
+curl -X POST http://localhost:8000/optimize \
+  -H "Content-Type: application/json" \
+  -d '{"locations": [[-73.8955, 40.8515], [-73.91335, 40.87995], [-73.90774, 40.88467], [-73.8955, 40.8515]]}'
+```
+
+### Go client
+
+```go
+POST http://route-optimizer:8000/optimize
+Content-Type: application/json
+
+{"locations": [[lon, lat], ...]}
+```
+
+Optional container env vars:
+
+| Variable | Default | Description |
+|---|---|---|
+| `ORS_API_KEY` | — | OpenRouteService API key (required) |
+| `ROUTE_OPTIMIZER_PROFILE` | `driving-car` | ORS travel profile |
+| `ROUTE_OPTIMIZER_TIME_LIMIT` | `5` | OR-Tools solver time limit (seconds) |
+
+Run locally without Docker:
+
+```bash
+uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+---
+
+## CLI usage
 
 Coordinates use **`latitude,longitude`** format.
 
@@ -54,7 +158,6 @@ python route_optimizer.py \
   --start "40.7128,-74.0060" \
   --stop "40.7580,-73.9855" \
   --stop "40.7484,-73.9857" \
-  --stop "40.7614,-73.9776" \
   --end "40.7308,-73.9973"
 ```
 
@@ -65,38 +168,30 @@ Create `route.json`. Each location can include address fields for labeling (only
 ```json
 {
   "start": {
-    "lat": 40.7128,
-    "lng": -74.0060,
-    "street_address_1": "123 Main St",
-    "city": "New York",
+    "lat": 40.8515,
+    "lng": -73.8955,
+    "street_address_1": "2249 Washington Ave",
+    "city": "Bronx",
     "state": "NY",
-    "zip": "10001"
+    "zip": ""
   },
   "stops": [
     {
-      "lat": 40.7580,
-      "lng": -73.9855,
-      "street_address_1": "456 Broadway",
-      "city": "New York",
+      "lat": 40.87995,
+      "lng": -73.91335,
+      "street_address_1": "1 Adrian Ave",
+      "city": "Bronx",
       "state": "NY",
-      "zip": "10012"
-    },
-    {
-      "lat": 40.7484,
-      "lng": -73.9857,
-      "street_address_1": "789 5th Ave",
-      "city": "New York",
-      "state": "NY",
-      "zip": "10022"
+      "zip": "10463"
     }
   ],
   "end": {
-    "lat": 40.7308,
-    "lng": -73.9973,
-    "street_address_1": "321 Park Ave",
-    "city": "New York",
+    "lat": 40.8515,
+    "lng": -73.8955,
+    "street_address_1": "2249 Washington Ave",
+    "city": "Bronx",
     "state": "NY",
-    "zip": "10010"
+    "zip": ""
   },
   "profile": "driving-car",
   "time_limit_seconds": 5
@@ -104,8 +199,6 @@ Create `route.json`. Each location can include address fields for labeling (only
 ```
 
 Legacy `[lat, lng]` arrays are still supported for start, end, and stops.
-
-Run:
 
 ```bash
 python route_optimizer.py --input route.json
@@ -117,63 +210,41 @@ python route_optimizer.py --input route.json
 from route_optimizer import Location, optimize_route
 
 result = optimize_route(
-    start=Location(
-        40.7128, -74.0060,
-        street_address_1="123 Main St",
-        city="New York",
-        state="NY",
-        zip="10001",
-    ),
-    stops=[
-        Location(40.7580, -73.9855, street_address_1="456 Broadway", city="New York", state="NY", zip="10012"),
-    ],
-    end=Location(40.7308, -73.9973, street_address_1="321 Park Ave", city="New York", state="NY", zip="10010"),
+    start=Location(40.8515, -73.8955, street_address_1="2249 Washington Ave", city="Bronx", state="NY"),
+    stops=[Location(40.87995, -73.91335, street_address_1="1 Adrian Ave", city="Bronx", state="NY", zip="10463")],
+    end=Location(40.8515, -73.8955, street_address_1="2249 Washington Ave", city="Bronx", state="NY"),
     api_key="your_api_key",
-    profile="driving-car",
 )
 
-print(result["stop_order"])            # original stop indices in optimized order
-print(result["ordered_locations"])     # full path with address labels
-print(result["total_distance_meters"]) # total road distance
+print(result["ordered_locations"])
+print(result["total_distance_meters"])
 ```
 
-## Output
-
-The script prints JSON:
+### CLI output
 
 ```json
 {
   "ordered_locations": [
     {
-      "lat": 40.7128,
-      "lng": -74.006,
-      "street_address_1": "123 Main St",
-      "city": "New York",
+      "lat": 40.8515,
+      "lng": -73.8955,
+      "street_address_1": "2249 Washington Ave",
+      "city": "Bronx",
       "state": "NY",
-      "zip": "10001",
-      "label": "123 Main St, New York, NY 10001"
+      "zip": "",
+      "label": "2249 Washington Ave, Bronx, NY"
     }
   ],
-  "ordered_coordinates": [[40.7128, -74.006], ...],
-  "ordered_indices": [0, 2, 3, 1, 4],
-  "stop_order": [1, 2, 0],
-  "total_distance_meters": 9858,
+  "ordered_coordinates": [[40.8515, -73.8955], ...],
+  "ordered_indices": [0, 2, 1, 3],
+  "stop_order": [1, 0],
+  "total_distance_meters": 21220,
   "distance_source": "openrouteservice",
   "profile": "driving-car"
 }
 ```
 
-| Field | Description |
-|---|---|
-| `ordered_locations` | Full route in visit order with coordinates and address labels |
-| `ordered_coordinates` | Coordinates only, in visit order |
-| `stop_order` | Original stop list indices in optimized order |
-| `total_distance_meters` | Total road distance along the route |
-| `profile` | OpenRouteService travel profile used |
-
-Each location in `ordered_locations` includes `street_address_1`, `city`, `state`, `zip`, and a formatted `label`.
-
-## Options
+### CLI options
 
 | Flag | Default | Description |
 |---|---|---|
@@ -182,12 +253,10 @@ Each location in `ordered_locations` includes `street_address_1`, `city`, `state
 | `--end` | — | End coordinate as `lat,lng` |
 | `--input`, `-i` | — | JSON input file |
 | `--api-key` | from `.env` | OpenRouteService API key |
-| `--profile` | `driving-car` | Travel mode (see below) |
+| `--profile` | `driving-car` | Travel mode |
 | `--time-limit` | `5` | OR-Tools solver time limit (seconds) |
 
 ### Travel profiles
-
-Common OpenRouteService profiles:
 
 - `driving-car` (default)
 - `driving-hgv`
