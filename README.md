@@ -18,6 +18,10 @@ Distances are based on actual road networks, not straight-line distance.
 | `main.py` | FastAPI HTTP service (Docker entrypoint) |
 | `route_optimizer.py` | Core optimizer + CLI |
 | `route.json` | Example CLI input with addresses |
+| `tests/test_route_optimizer.py` | Core optimizer + CLI unit tests |
+| `tests/test_main.py` | FastAPI endpoint unit tests |
+| `tests/test_live_integration.py` | Live OpenRouteService integration tests |
+| `pytest.ini` | Pytest config (unit tests run by default) |
 | `Dockerfile` | Container image for the HTTP API |
 | `.env` | OpenRouteService API key (not committed) |
 
@@ -264,3 +268,23 @@ print(result["total_distance_meters"])
 - `cycling-regular`
 
 See the [OpenRouteService docs](https://openrouteservice.org/dev/#/api-docs) for the full list.
+
+## Tests
+
+```bash
+source .venv/bin/activate      # if using a venv
+pip install -r requirements.txt
+pytest                         # unit tests only (mocked, no API calls)
+pytest -m integration -v       # live OpenRouteService tests (uses .env)
+pytest -v                      # all tests
+```
+
+By default, `pytest.ini` excludes integration tests (`-m "not integration"`).
+
+| Test file | Coverage |
+|---|---|
+| `tests/test_route_optimizer.py` | `Location`, distance matrix, route optimization, CLI helpers, and `main` |
+| `tests/test_main.py` | `/health`, `/optimize`, API key handling, request validation |
+| `tests/test_live_integration.py` | End-to-end calls to OpenRouteService (skipped without `ORS_API_KEY`) |
+
+Unit tests mock external services and do not require an API key. Integration tests require `ORS_API_KEY` in `.env` and make real API calls to OpenRouteService.
