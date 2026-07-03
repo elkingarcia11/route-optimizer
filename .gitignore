@@ -1,7 +1,21 @@
+# Local secrets and CLI config
 .env
+
+# Python
 .venv/
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyo
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .coverage
 htmlcov/
+*.egg-info/
+dist/
+build/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

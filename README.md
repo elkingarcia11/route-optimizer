@@ -1,13 +1,15 @@
 # Route Optimizer
 
-Reorder a list of stops to minimize total travel distance on real roads, with a fixed start and end point.
+Split stops across one or more routes balanced by road distance, or optimize a single route between a fixed start and end.
 
-Given a list of **addresses** (HTTP API) or coordinates (CLI), the service finds the best order to visit every stop exactly once while keeping the start and end fixed.
+Given **start**, **end**, and at least **two stops** (HTTP API) or coordinates (CLI), the service finds the best visit order on real roads using OpenRouteService and Google OR-Tools.
 
 ## How it works
 
 1. **OpenRouteService** builds a road distance matrix (meters) between all locations.
-2. **Google OR-Tools** solves the routing problem and returns the optimized visit order.
+2. **Google OR-Tools** solves the routing problem:
+   - **`numRoutes: 1`** — single route from start through all stops to end.
+   - **`numRoutes` > 1** — multi-route VRP from a shared depot (start and end must match), splitting stops and balancing driving distance per route.
 
 Distances are based on actual road networks, not straight-line distance.
 
@@ -18,12 +20,14 @@ Distances are based on actual road networks, not straight-line distance.
 | `main.py` | FastAPI HTTP service (Docker entrypoint) |
 | `route_optimizer.py` | Core optimizer + CLI |
 | `route.json` | Example CLI input with addresses |
+| `examples/` | Sample HTTP request/response JSON payloads |
 | `tests/test_route_optimizer.py` | Core optimizer + CLI unit tests |
 | `tests/test_main.py` | FastAPI endpoint unit tests |
 | `tests/test_live_integration.py` | Live OpenRouteService integration tests |
 | `pytest.ini` | Pytest config (unit tests run by default) |
 | `Dockerfile` | Container image for the HTTP API |
-| `.env` | OpenRouteService API key (not committed) |
+| `.env` | OpenRouteService API key for CLI (not committed) |
+| `.env.example` | Example env file for CLI setup |
 
 ## Requirements
 
@@ -45,16 +49,19 @@ pip install -r requirements.txt
 
 ### HTTP API
 
-Pass `apiKey` in each `POST /optimize` request body. This lets callers rotate keys when one expires or hits its limit without redeploying:
+`apiKey` is **required in every** request body (`POST /routes/single` and `POST /routes/balance`). Callers pass their OpenRouteService key on each request so keys can be rotated without redeploying:
 
 ```json
 {
   "apiKey": "your_openrouteservice_api_key",
-  "addresses": [...]
+  "start": { ... },
+  "end": { ... },
+  "stops": [ ... ],
+  "numRoutes": 1
 }
 ```
 
-If `apiKey` is omitted, the service falls back to the `ORS_API_KEY` environment variable.
+The HTTP API does **not** read `ORS_API_KEY` from the environment.
 
 ### CLI and local development
 
@@ -68,7 +75,7 @@ Edit `.env`:
 ORS_API_KEY=your_actual_api_key
 ```
 
-The CLI loads `.env` automatically. For Docker without per-request keys, pass the env var with `--env-file .env` or `-e ORS_API_KEY=...`.
+The CLI loads `.env` automatically and uses `ORS_API_KEY` when `--api-key` is not passed.
 
 ---
 
@@ -78,15 +85,15 @@ Build and run on port 8000:
 
 ```bash
 docker build -t route-optimizer .
-docker run --rm -p 8000:8000 --name route-optimizer --env-file .env route-optimizer
+docker run --rm -p 8000:8000 --name route-optimizer route-optimizer
 ```
 
 The image uses `requirements-docker.txt` (runtime deps only — no pytest/httpx).
 
-On a shared Docker network, other services (e.g. a Go API) reach it at:
+On a shared Docker network, other services (e.g. address-mapper or a Go API) reach it at:
 
 ```
-http://route-optimizer:8000/optimize
+http://route-optimizer:8000/routes/single
 ```
 
 Set `ROUTE_OPTIMIZER_URL` in the caller if the host differs.
@@ -94,10 +101,41 @@ Set `ROUTE_OPTIMIZER_URL` in the caller if the host differs.
 | Endpoint | Method | Description |
 |---|---|---|
 | `/health` | GET | Health check |
-| `/optimize` | POST | Optimize route using `core.Address` payloads |
+| `/routes/single` | POST | One optimized route (start → stops → end) |
+| `/routes/balance` | POST | Split stops across routes balanced by distance |
 | `/docs` | GET | Swagger UI (interactive API docs) |
 | `/redoc` | GET | ReDoc API reference |
 | `/openapi.json` | GET | OpenAPI 3 schema |
+
+Sample request/response JSON files live in [`examples/`](examples/).
+
+### Quick start with curl
+
+Health check:
+
+```bash
+curl http://localhost:8000/health
+```
+
+Single route (see [`examples/single-route.request.json`](examples/single-route.request.json)):
+
+```bash
+curl -X POST http://localhost:8000/routes/single \
+  -H "Content-Type: application/json" \
+  -d @examples/single-route.request.json
+```
+
+Balanced multi-route (see [`examples/balance-routes.request.json`](examples/balance-routes.request.json)):
+
+```bash
+curl -X POST http://localhost:8000/routes/balance \
+  -H "Content-Type: application/json" \
+  -d @examples/balance-routes.request.json
+```
+
+Replace `your_openrouteservice_api_key` in the example files with your real key before running.
+
+Expected response shapes: [`examples/single-route.response.json`](examples/single-route.response.json), [`examples/balance-routes.response.json`](examples/balance-routes.response.json).
 
 ### Address schema
 
@@ -118,49 +156,49 @@ The HTTP API uses the same shape as Go `core.Address`:
 | `verification.is_verified` | boolean | Whether the address is verified |
 | `verification.verified_at` | string | Verification timestamp |
 
-Response addresses include all input fields plus `routeOrder` (1-based visit position).
+Response addresses include all input fields plus `routeOrder` (1-based visit position within that route).
 
-### Request — `POST /optimize`
+### Request — `POST /routes/single`
 
-| Field | Type | Description |
-|---|---|---|
-| `apiKey` | string | OpenRouteService API key (preferred; rotates per request) |
-| `addresses` | array | Ordered list of addresses — first is start, last is end |
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `apiKey` | string | yes | OpenRouteService API key |
+| `start` | Address | yes | Route start |
+| `end` | Address | yes | Route end |
+| `stops` | Address[] | yes | At least **two** stop addresses |
 
 ```json
 {
   "apiKey": "your_openrouteservice_api_key",
-  "addresses": [
-    {
-      "address1": "2249 Washington Ave",
-      "city": "Bronx",
-      "state": "NY",
-      "zipcode": "10451",
-      "location": {
-        "type": "Point",
-        "coordinates": [-73.8955, 40.8515]
-      }
-    },
-    {
-      "address1": "1 Adrian Ave",
-      "city": "Bronx",
-      "state": "NY",
-      "zipcode": "10463",
-      "location": {
-        "type": "Point",
-        "coordinates": [-73.91335, 40.87995]
-      }
-    },
-    {
-      "address1": "2249 Washington Ave",
-      "city": "Bronx",
-      "state": "NY",
-      "location": {
-        "type": "Point",
-        "coordinates": [-73.8955, 40.8515]
-      }
-    }
+  "start": { "address1": "2249 Washington Ave", "location": { "type": "Point", "coordinates": [-73.8955, 40.8515] } },
+  "end": { "address1": "1101 Forest Ave", "location": { "type": "Point", "coordinates": [-73.90774, 40.88467] } },
+  "stops": [
+    { "address1": "1 Adrian Ave", "location": { "type": "Point", "coordinates": [-73.91335, 40.87995] } },
+    { "address1": "125 W 228th St", "location": { "type": "Point", "coordinates": [-73.90774, 40.88467] } }
   ]
+}
+```
+
+### Request — `POST /routes/balance`
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `apiKey` | string | yes | OpenRouteService API key |
+| `start` | Address | yes | Depot (same as `end`) |
+| `end` | Address | yes | Depot (same as `start`) |
+| `stops` | Address[] | yes | At least **two** stop addresses |
+| `numRoutes` | integer | yes | At least **2** routes |
+
+```json
+{
+  "apiKey": "your_openrouteservice_api_key",
+  "start": { "address1": "2249 Washington Ave", "location": { "type": "Point", "coordinates": [-73.8955, 40.8515] } },
+  "end": { "address1": "2249 Washington Ave", "location": { "type": "Point", "coordinates": [-73.8955, 40.8515] } },
+  "stops": [
+    { "address1": "1 Adrian Ave", "location": { "type": "Point", "coordinates": [-73.91335, 40.87995] } },
+    { "address1": "1101 Forest Ave", "location": { "type": "Point", "coordinates": [-73.90774, 40.88467] } }
+  ],
+  "numRoutes": 2
 }
 ```
 
@@ -172,64 +210,106 @@ Optional address fields: `address2`, `apartment`, `country`, and `verification` 
 
 ```json
 {
-  "addresses": [
+  "routes": [
     {
-      "address1": "2249 Washington Ave",
-      "address2": "",
-      "apartment": "",
-      "city": "Bronx",
-      "country": "",
-      "state": "NY",
-      "zipcode": "10451",
-      "location": {
-        "type": "Point",
-        "coordinates": [-73.8955, 40.8515]
-      },
-      "verification": null,
-      "routeOrder": 1
+      "routeNumber": 1,
+      "addresses": [
+        {
+          "address1": "2249 Washington Ave",
+          "city": "Bronx",
+          "state": "NY",
+          "location": {
+            "type": "Point",
+            "coordinates": [-73.8955, 40.8515]
+          },
+          "routeOrder": 1
+        },
+        {
+          "address1": "1 Adrian Ave",
+          "location": {
+            "type": "Point",
+            "coordinates": [-73.91335, 40.87995]
+          },
+          "routeOrder": 2
+        },
+        {
+          "address1": "2249 Washington Ave",
+          "location": {
+            "type": "Point",
+            "coordinates": [-73.8955, 40.8515]
+          },
+          "routeOrder": 3
+        }
+      ],
+      "distanceMeters": 8500
     }
   ],
-  "totalDistanceMeters": 21220
+  "numRoutes": 1,
+  "totalDistanceMeters": 8500
 }
 ```
 
 | Field | Description |
 |---|---|
-| `addresses` | Input addresses in optimized visit order |
-| `routeOrder` | 1-based position in the optimized route |
-| `totalDistanceMeters` | Total road distance for the optimized route |
+| `routes` | Optimized routes in order |
+| `routes[].routeNumber` | 1-based route identifier |
+| `routes[].addresses` | Addresses in visit order for that route |
+| `routes[].distanceMeters` | Road distance for that route in meters |
+| `routeOrder` | 1-based position within the route |
+| `numRoutes` | Number of routes returned |
+| `totalDistanceMeters` | Combined road distance across all routes |
 
-### curl example
+### curl examples
+
+Single route:
 
 ```bash
-curl -X POST http://localhost:8000/optimize \
+curl -X POST http://localhost:8000/routes/single \
   -H "Content-Type: application/json" \
-  -d '{
-    "apiKey": "your_openrouteservice_api_key",
-    "addresses": [
-      {"address1": "Start", "location": {"type": "Point", "coordinates": [-73.8955, 40.8515]}},
-      {"address1": "Stop", "location": {"type": "Point", "coordinates": [-73.91335, 40.87995]}},
-      {"address1": "End", "location": {"type": "Point", "coordinates": [-73.8955, 40.8515]}}
-    ]
-  }'
+  -d @examples/single-route.request.json
+```
+
+Balanced multi-route:
+
+```bash
+curl -X POST http://localhost:8000/routes/balance \
+  -H "Content-Type: application/json" \
+  -d @examples/balance-routes.request.json
 ```
 
 ### Go client
 
 ```go
-POST http://route-optimizer:8000/optimize
+POST http://route-optimizer:8000/routes/single
 Content-Type: application/json
 
-{"apiKey": "...", "addresses": [{...core.Address...}, ...]}
+{
+  "apiKey": "...",
+  "start": {...core.Address...},
+  "end": {...core.Address...},
+  "stops": [{...core.Address...}, ...]
+}
+```
+
+```go
+POST http://route-optimizer:8000/routes/balance
+Content-Type: application/json
+
+{
+  "apiKey": "...",
+  "start": {...core.Address...},
+  "end": {...core.Address...},
+  "stops": [{...core.Address...}, ...],
+  "numRoutes": 2
+}
 ```
 
 Optional container env vars:
 
 | Variable | Default | Description |
 |---|---|---|
-| `ORS_API_KEY` | — | Fallback OpenRouteService API key when `apiKey` is omitted |
 | `ROUTE_OPTIMIZER_PROFILE` | `driving-car` | ORS travel profile |
-| `ROUTE_OPTIMIZER_TIME_LIMIT` | `5` | OR-Tools solver time limit (seconds) |
+| `ROUTE_OPTIMIZER_TIME_LIMIT` | `5` | OR-Tools solver time limit for single-route mode (seconds) |
 
 Run locally without Docker:
 
@@ -277,6 +357,14 @@ Create `route.json`. Each location can include address fields for labeling (only
       "city": "Bronx",
       "state": "NY",
       "zip": "10463"
+    },
+    {
+      "lat": 40.88467,
+      "lng": -73.90774,
+      "street_address_1": "125 W 228th St",
+      "city": "Bronx",
+      "state": "NY",
+      "zip": "10463"
     }
   ],
   "end": {
@@ -301,17 +389,33 @@ python route_optimizer.py --input route.json
 ### Python module
 
 ```python
-from route_optimizer import Location, optimize_route
+from route_optimizer import Location, optimize_balanced_multi_route, optimize_route
 
+# Single route
 result = optimize_route(
     start=Location(40.8515, -73.8955, street_address_1="2249 Washington Ave", city="Bronx", state="NY"),
-    stops=[Location(40.87995, -73.91335, street_address_1="1 Adrian Ave", city="Bronx", state="NY", zip="10463")],
+    stops=[
+        Location(40.87995, -73.91335, street_address_1="1 Adrian Ave", city="Bronx", state="NY", zip="10463"),
+        Location(40.88467, -73.90774, street_address_1="125 W 228th St", city="Bronx", state="NY"),
+    ],
     end=Location(40.8515, -73.8955, street_address_1="2249 Washington Ave", city="Bronx", state="NY"),
     api_key="your_api_key",
 )
 
+# Multi-route, balanced by distance
+depot = Location(40.8515, -73.8955, street_address_1="2249 Washington Ave", city="Bronx", state="NY")
+multi = optimize_balanced_multi_route(
+    depot,
+    [
+        Location(40.87995, -73.91335, street_address_1="1 Adrian Ave"),
+        Location(40.88467, -73.90774, street_address_1="125 W 228th St"),
+    ],
+    num_routes=2,
+    api_key="your_api_key",
+)
+
 print(result["ordered_locations"])
-print(result["total_distance_meters"])
+print(multi["routes"])
 ```
 
 ### CLI output
@@ -373,8 +477,8 @@ By default, `pytest.ini` excludes integration tests (`-m "not integration"`).
 
 | Test file | Coverage |
 |---|---|
-| `tests/test_route_optimizer.py` | `Location`, distance matrix, route optimization, CLI helpers, and `main` |
-| `tests/test_main.py` | `/health`, `/optimize` with `Address` payloads, validation, and `routeOrder` |
-| `tests/test_live_integration.py` | Live HTTP + optimizer calls using `addresses` (skipped without `ORS_API_KEY`) |
+| `tests/test_route_optimizer.py` | `Location`, distance matrix, single- and multi-route optimization, CLI helpers |
+| `tests/test_main.py` | `/health`, `/routes/single`, `/routes/balance`, validation, and responses |
+| `tests/test_live_integration.py` | Live HTTP + optimizer calls (skipped without `ORS_API_KEY` in `.env`) |
 
-Unit tests mock external services and do not require an API key. Integration tests require `ORS_API_KEY` in `.env` and make real API calls to OpenRouteService.
+Unit tests mock external services and do not require an API key. Integration tests read `ORS_API_KEY` from `.env` for live OpenRouteService calls and pass it as `apiKey` in HTTP request payloads.

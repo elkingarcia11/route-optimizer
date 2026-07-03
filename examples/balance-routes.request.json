@@ -1,0 +1,46 @@
+{
+  "apiKey": "your_openrouteservice_api_key",
+  "start": {
+    "address1": "2249 Washington Ave",
+    "city": "Bronx",
+    "state": "NY",
+    "zipcode": "10451",
+    "location": {
+      "type": "Point",
+      "coordinates": [-73.8955, 40.8515]
+    }
+  },
+  "end": {
+    "address1": "2249 Washington Ave",
+    "city": "Bronx",
+    "state": "NY",
+    "zipcode": "10451",
+    "location": {
+      "type": "Point",
+      "coordinates": [-73.8955, 40.8515]
+    }
+  },
+  "stops": [
+    {
+      "address1": "1 Adrian Ave",
+      "city": "Bronx",
+      "state": "NY",
+      "zipcode": "10463",
+      "location": {
+        "type": "Point",
+        "coordinates": [-73.91335, 40.87995]
+      }
+    },
+    {
+      "address1": "1101 Forest Ave",
+      "city": "Bronx",
+      "state": "NY",
+      "zipcode": "10456",
+      "location": {
+        "type": "Point",
+        "coordinates": [-73.90774, 40.88467]
+      }
+    }
+  ],
+  "numRoutes": 2
+}

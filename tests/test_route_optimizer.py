@@ -16,7 +16,9 @@ from route_optimizer import (
     _parse_coordinate,
     _resolve_api_key,
     build_distance_matrix_ors,
+    compute_vrp_time_limit,
     main,
+    optimize_balanced_multi_route,
     optimize_route,
 )
 
@@ -287,6 +289,74 @@ class TestOptimizeRoute:
 
         # PATH_CHEAPEST_ARC on this matrix: 0->1 (100) + 1->2 (150) + 2->3 (100)
         assert result["total_distance_meters"] == 350
+
+
+class TestComputeVrpTimeLimit:
+    def test_scales_with_stops_and_routes(self) -> None:
+        assert compute_vrp_time_limit(10, 2) == 45
+        assert compute_vrp_time_limit(100, 10) == 215
+
+    def test_respects_minimum(self) -> None:
+        assert compute_vrp_time_limit(0, 1) == 30
+
+    def test_respects_maximum(self) -> None:
+        assert compute_vrp_time_limit(1000, 100) == 300
+
+
+class TestOptimizeBalancedMultiRoute:
+    DEPOT = Location(lat=40.0, lng=-73.0)
+    STOP_A = Location(lat=40.1, lng=-73.1)
+    STOP_B = Location(lat=40.2, lng=-73.2)
+    STOP_C = Location(lat=40.15, lng=-73.15)
+
+    @patch("route_optimizer.build_distance_matrix_ors")
+    def test_splits_stops_across_routes(
+        self, mock_build_matrix: MagicMock
+    ) -> None:
+        # depot=0, stop_a=1, stop_b=2, stop_c=3
+        mock_build_matrix.return_value = [
+            [0, 100, 200, 150],
+            [100, 0, 100, 50],
+            [200, 100, 0, 80],
+            [150, 50, 80, 0],
+        ]
+
+        result = optimize_balanced_multi_route(
+            self.DEPOT,
+            [self.STOP_A, self.STOP_B, self.STOP_C],
+            2,
+            api_key="test-key",
+            time_limit_seconds=30,
+        )
+
+        assert result["num_routes"] == 2
+        assert result["split_mode"] == "balanced_distance"
+        assert len(result["routes"]) == 2
+        assert result["total_distance_meters"] > 0
+        all_stops = []
+        for route in result["routes"]:
+            assert route["route_number"] in (1, 2)
+            assert route["distance_meters"] > 0
+            all_stops.extend(route["stop_order"])
+        assert sorted(all_stops) == [0, 1, 2]
+
+    def test_rejects_more_routes_than_stops(self) -> None:
+        with pytest.raises(ValueError, match="Cannot create 3 routes"):
+            optimize_balanced_multi_route(
+                self.DEPOT,
+                [self.STOP_A],
+                3,
+                api_key="test-key",
+            )
+
+    def test_rejects_empty_stops(self) -> None:
+        with pytest.raises(ValueError, match="At least one stop"):
+            optimize_balanced_multi_route(
+                self.DEPOT,
+                [],
+                1,
+                api_key="test-key",
+            )
 
 
 class TestParseCoordinate:
