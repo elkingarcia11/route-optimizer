@@ -23,6 +23,24 @@ MINIMAL_LOCATIONS = [
 ]
 
 
+def _address_from_lonlat(lon: float, lat: float, address1: str = "") -> dict:
+    return {
+        "address1": address1,
+        "location": {"type": "Point", "coordinates": [lon, lat]},
+    }
+
+
+MINIMAL_ADDRESSES = [
+    _address_from_lonlat(lon, lat, label)
+    for lon, lat, label in [
+        (MINIMAL_LOCATIONS[0][0], MINIMAL_LOCATIONS[0][1], "Start"),
+        (MINIMAL_LOCATIONS[1][0], MINIMAL_LOCATIONS[1][1], "Stop A"),
+        (MINIMAL_LOCATIONS[2][0], MINIMAL_LOCATIONS[2][1], "Stop B"),
+        (MINIMAL_LOCATIONS[-1][0], MINIMAL_LOCATIONS[-1][1], "End"),
+    ]
+]
+
+
 @pytest.fixture(scope="module", autouse=True)
 def load_dotenv_for_integration() -> None:
     load_dotenv(PROJECT_ROOT / ".env")
@@ -36,7 +54,7 @@ def api_key() -> str:
     return key
 
 
-def _assert_valid_route(
+def _assert_valid_route_indices(
     location_count: int,
     ordered_indices: list[int],
     total_distance_meters: int,
@@ -45,6 +63,18 @@ def _assert_valid_route(
     assert ordered_indices[0] == 0
     assert ordered_indices[-1] == location_count - 1
     assert sorted(ordered_indices) == list(range(location_count))
+    assert total_distance_meters > 0
+
+
+def _assert_valid_address_route(
+    address_count: int,
+    ordered_addresses: list[dict],
+    total_distance_meters: int,
+) -> None:
+    assert len(ordered_addresses) == address_count
+    assert [addr["routeOrder"] for addr in ordered_addresses] == list(
+        range(1, address_count + 1)
+    )
     assert total_distance_meters > 0
 
 
@@ -84,7 +114,7 @@ class TestLiveOpenRouteService:
             time_limit_seconds=5,
         )
 
-        _assert_valid_route(
+        _assert_valid_route_indices(
             len(MINIMAL_LOCATIONS),
             result["ordered_indices"],
             result["total_distance_meters"],
@@ -98,38 +128,46 @@ class TestLiveHttpApi:
         client = TestClient(app)
         response = client.post(
             "/optimize",
-            json={"locations": MINIMAL_LOCATIONS},
+            json={"addresses": MINIMAL_ADDRESSES},
         )
 
         assert response.status_code == 200
         body = response.json()
-        _assert_valid_route(
-            len(MINIMAL_LOCATIONS),
-            body["routeIndexes"],
+        _assert_valid_address_route(
+            len(MINIMAL_ADDRESSES),
+            body["addresses"],
             body["totalDistanceMeters"],
         )
-        assert body["orderedLocations"] == [
-            MINIMAL_LOCATIONS[i] for i in body["routeIndexes"]
-        ]
+        assert body["addresses"][0]["address1"] == "Start"
+        assert body["addresses"][-1]["address1"] == "End"
 
     def test_optimize_route_json_payload(self, api_key: str) -> None:
         if not ROUTE_JSON.exists():
             pytest.skip("route.json not found")
 
         payload = json.loads(ROUTE_JSON.read_text(encoding="utf-8"))
-        locations = [
-            [loc["lng"], loc["lat"]]
+        addresses = [
+            {
+                "address1": loc.get("street_address_1", ""),
+                "city": loc.get("city", ""),
+                "state": loc.get("state", ""),
+                "zipcode": loc.get("zip", ""),
+                "location": {
+                    "type": "Point",
+                    "coordinates": [loc["lng"], loc["lat"]],
+                },
+            }
             for loc in [payload["start"], *payload["stops"], payload["end"]]
         ]
 
         client = TestClient(app)
-        response = client.post("/optimize", json={"locations": locations})
+        response = client.post("/optimize", json={"addresses": addresses})
 
         assert response.status_code == 200
         body = response.json()
-        _assert_valid_route(
-            len(locations),
-            body["routeIndexes"],
+        _assert_valid_address_route(
+            len(addresses),
+            body["addresses"],
             body["totalDistanceMeters"],
         )
-        assert len(body["orderedLocations"]) == len(locations)
+        assert body["addresses"][0]["city"] == payload["start"]["city"]

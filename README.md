@@ -2,7 +2,7 @@
 
 Reorder a list of stops to minimize total travel distance on real roads, with a fixed start and end point.
 
-Given coordinates for a **start**, several **stops**, and an **end**, the service finds the best order to visit every stop exactly once while keeping the start and end fixed.
+Given a list of **addresses** (HTTP API) or coordinates (CLI), the service finds the best order to visit every stop exactly once while keeping the start and end fixed.
 
 ## How it works
 
@@ -77,53 +77,119 @@ Set `ROUTE_OPTIMIZER_URL` in the caller if the host differs.
 | Endpoint | Method | Description |
 |---|---|---|
 | `/health` | GET | Health check |
-| `/optimize` | POST | Optimize route (Go-compatible) |
-| `/docs` | GET | Swagger UI |
+| `/optimize` | POST | Optimize route using `core.Address` payloads |
+| `/docs` | GET | Swagger UI (interactive API docs) |
+| `/redoc` | GET | ReDoc API reference |
+| `/openapi.json` | GET | OpenAPI 3 schema |
+
+### Address schema
+
+The HTTP API uses the same shape as Go `core.Address`:
+
+| Field | Type | Description |
+|---|---|---|
+| `address1` | string | Primary street address |
+| `address2` | string | Secondary street address |
+| `apartment` | string | Apartment or unit |
+| `city` | string | City |
+| `country` | string | Country |
+| `state` | string | State or province |
+| `zipcode` | string | Postal code |
+| `location` | object | GeoJSON point (`type`, `coordinates`) |
+| `location.coordinates` | `[number, number]` | `[longitude, latitude]` |
+| `verification` | object | Optional Google verification metadata |
+| `verification.is_verified` | boolean | Whether the address is verified |
+| `verification.verified_at` | string | Verification timestamp |
+
+Response addresses include all input fields plus `routeOrder` (1-based visit position).
 
 ### Request — `POST /optimize`
 
-Each location is **`[longitude, latitude]`**. First = start, last = end, middle = stops.
+Send a list of `Address` objects. First = start, last = end, middle = stops.
 
 ```json
 {
-  "locations": [
-    [-73.8955, 40.8515],
-    [-73.91335, 40.87995],
-    [-73.90774, 40.88467],
-    [-73.90478, 40.83256],
-    [-73.8955, 40.8515]
+  "addresses": [
+    {
+      "address1": "2249 Washington Ave",
+      "city": "Bronx",
+      "state": "NY",
+      "zipcode": "10451",
+      "location": {
+        "type": "Point",
+        "coordinates": [-73.8955, 40.8515]
+      }
+    },
+    {
+      "address1": "1 Adrian Ave",
+      "city": "Bronx",
+      "state": "NY",
+      "zipcode": "10463",
+      "location": {
+        "type": "Point",
+        "coordinates": [-73.91335, 40.87995]
+      }
+    },
+    {
+      "address1": "2249 Washington Ave",
+      "city": "Bronx",
+      "state": "NY",
+      "location": {
+        "type": "Point",
+        "coordinates": [-73.8955, 40.8515]
+      }
+    }
   ]
 }
 ```
+
+`location.coordinates` is GeoJSON order: **`[longitude, latitude]`**.
+
+Optional address fields: `address2`, `apartment`, `country`, and `verification` (`is_verified`, `verified_at`).
 
 ### Response
 
 ```json
 {
-  "routeIndexes": [0, 3, 2, 1, 4],
-  "totalDistanceMeters": 21220,
-  "orderedLocations": [
-    [-73.8955, 40.8515],
-    [-73.90478, 40.83256],
-    [-73.90774, 40.88467],
-    [-73.91335, 40.87995],
-    [-73.8955, 40.8515]
-  ]
+  "addresses": [
+    {
+      "address1": "2249 Washington Ave",
+      "address2": "",
+      "apartment": "",
+      "city": "Bronx",
+      "country": "",
+      "state": "NY",
+      "zipcode": "10451",
+      "location": {
+        "type": "Point",
+        "coordinates": [-73.8955, 40.8515]
+      },
+      "verification": null,
+      "routeOrder": 1
+    }
+  ],
+  "totalDistanceMeters": 21220
 }
 ```
 
 | Field | Description |
 |---|---|
-| `routeIndexes` | Indices into the input `locations` array, in visit order |
+| `addresses` | Input addresses in optimized visit order |
+| `routeOrder` | 1-based position in the optimized route |
 | `totalDistanceMeters` | Total road distance for the optimized route |
-| `orderedLocations` | `[lon, lat]` pairs in optimized visit order |
 
 ### curl example
 
 ```bash
 curl -X POST http://localhost:8000/optimize \
   -H "Content-Type: application/json" \
-  -d '{"locations": [[-73.8955, 40.8515], [-73.91335, 40.87995], [-73.90774, 40.88467], [-73.8955, 40.8515]]}'
+  -d '{
+    "addresses": [
+      {"address1": "Start", "location": {"type": "Point", "coordinates": [-73.8955, 40.8515]}},
+      {"address1": "Stop", "location": {"type": "Point", "coordinates": [-73.91335, 40.87995]}},
+      {"address1": "End", "location": {"type": "Point", "coordinates": [-73.8955, 40.8515]}}
+    ]
+  }'
 ```
 
 ### Go client
@@ -132,7 +198,7 @@ curl -X POST http://localhost:8000/optimize \
 POST http://route-optimizer:8000/optimize
 Content-Type: application/json
 
-{"locations": [[lon, lat], ...]}
+{"addresses": [{...core.Address...}, ...]}
 ```
 
 Optional container env vars:
@@ -148,6 +214,8 @@ Run locally without Docker:
 ```bash
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
+
+Then open Swagger UI at [http://localhost:8000/docs](http://localhost:8000/docs) to try the API interactively.
 
 ---
 
@@ -284,7 +352,7 @@ By default, `pytest.ini` excludes integration tests (`-m "not integration"`).
 | Test file | Coverage |
 |---|---|
 | `tests/test_route_optimizer.py` | `Location`, distance matrix, route optimization, CLI helpers, and `main` |
-| `tests/test_main.py` | `/health`, `/optimize`, API key handling, request validation |
-| `tests/test_live_integration.py` | End-to-end calls to OpenRouteService (skipped without `ORS_API_KEY`) |
+| `tests/test_main.py` | `/health`, `/optimize` with `Address` payloads, validation, and `routeOrder` |
+| `tests/test_live_integration.py` | Live HTTP + optimizer calls using `addresses` (skipped without `ORS_API_KEY`) |
 
 Unit tests mock external services and do not require an API key. Integration tests require `ORS_API_KEY` in `.env` and make real API calls to OpenRouteService.
