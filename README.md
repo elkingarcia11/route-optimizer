@@ -81,6 +81,8 @@ docker build -t route-optimizer .
 docker run --rm -p 8000:8000 --name route-optimizer --env-file .env route-optimizer
 ```
 
+The image uses `requirements-docker.txt` (runtime deps only — no pytest/httpx).
+
 On a shared Docker network, other services (e.g. a Go API) reach it at:
 
 ```
