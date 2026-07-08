@@ -10,17 +10,13 @@ import pytest
 
 from route_optimizer import (
     Location,
-    _load_env,
-    _load_input,
     _ors_distance_to_int,
-    _parse_coordinate,
-    _resolve_api_key,
     build_distance_matrix_ors,
-    compute_vrp_time_limit,
-    main,
-    optimize_balanced_multi_route,
     optimize_route,
 )
+from utils.cli import _load_input, _parse_coordinate, main
+from utils.multi_route import compute_vrp_time_limit, optimize_balanced_multi_route
+from utils.ors_config import load_env, resolve_api_key
 
 
 class TestLocationFromValue:
@@ -321,7 +317,7 @@ class TestOptimizeBalancedMultiRoute:
     STOP_B = Location(lat=40.2, lng=-73.2)
     STOP_C = Location(lat=40.15, lng=-73.15)
 
-    @patch("route_optimizer.build_distance_matrix_ors")
+    @patch("utils.multi_route.build_distance_matrix_ors")
     def test_splits_stops_across_routes(
         self, mock_build_matrix: MagicMock
     ) -> None:
@@ -411,9 +407,9 @@ class TestLoadInput:
 
 
 class TestLoadEnv:
-    @patch("route_optimizer.load_dotenv")
+    @patch("utils.ors_config.load_dotenv")
     def test_loads_dotenv_from_project_directory(self, mock_load_dotenv: MagicMock) -> None:
-        _load_env()
+        load_env()
         mock_load_dotenv.assert_called_once()
         env_path = mock_load_dotenv.call_args.args[0]
         assert env_path.name == ".env"
@@ -423,27 +419,27 @@ class TestLoadEnv:
 class TestResolveApiKey:
     def test_returns_explicit_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("ORS_API_KEY", raising=False)
-        assert _resolve_api_key("explicit-key") == "explicit-key"
+        assert resolve_api_key("explicit-key") == "explicit-key"
 
     def test_returns_env_var_when_no_explicit_key(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("ORS_API_KEY", "env-key")
-        assert _resolve_api_key(None) == "env-key"
+        assert resolve_api_key(None) == "env-key"
 
     def test_explicit_key_overrides_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ORS_API_KEY", "env-key")
-        assert _resolve_api_key("explicit-key") == "explicit-key"
+        assert resolve_api_key("explicit-key") == "explicit-key"
 
     def test_exits_when_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("ORS_API_KEY", raising=False)
         with pytest.raises(SystemExit, match="OpenRouteService API key required"):
-            _resolve_api_key(None)
+            resolve_api_key(None)
 
 
 class TestMain:
-    @patch("route_optimizer.optimize_route")
-    @patch("route_optimizer._load_env")
+    @patch("utils.cli.optimize_route")
+    @patch("utils.cli.load_env")
     def test_cli_with_coordinates(
         self,
         mock_load_env: MagicMock,
@@ -485,8 +481,8 @@ class TestMain:
         output = json.loads(capsys.readouterr().out)
         assert output["total_distance_meters"] == 1000
 
-    @patch("route_optimizer.optimize_route")
-    @patch("route_optimizer._load_env")
+    @patch("utils.cli.optimize_route")
+    @patch("utils.cli.load_env")
     def test_cli_with_input_file(
         self,
         mock_load_env: MagicMock,
@@ -530,7 +526,7 @@ class TestMain:
         with pytest.raises(SystemExit):
             main([])
 
-    @patch("route_optimizer._load_env")
+    @patch("utils.cli.load_env")
     def test_cli_exits_without_api_key(
         self, mock_load_env: MagicMock, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -769,19 +765,19 @@ class TestResolveApiKeyEdgeCases:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("ORS_API_KEY", "env-key")
-        assert _resolve_api_key("") == "env-key"
+        assert resolve_api_key("") == "env-key"
 
     def test_empty_env_var_exits(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ORS_API_KEY", "")
         with pytest.raises(SystemExit, match="OpenRouteService API key required"):
-            _resolve_api_key(None)
+            resolve_api_key(None)
 
     def test_empty_explicit_and_empty_env_exits(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("ORS_API_KEY", "")
         with pytest.raises(SystemExit, match="OpenRouteService API key required"):
-            _resolve_api_key("")
+            resolve_api_key("")
 
 
 class TestMainEdgeCases:
@@ -793,7 +789,7 @@ class TestMainEdgeCases:
         with pytest.raises(SystemExit):
             main(["--start", "40.0,-73.0", "--end", "40.3,-73.3"])
 
-    @patch("route_optimizer._load_env")
+    @patch("utils.cli.load_env")
     def test_raises_when_input_file_missing(
         self, mock_load_env: MagicMock, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -801,7 +797,7 @@ class TestMainEdgeCases:
         with pytest.raises(FileNotFoundError):
             main(["--input", "/nonexistent/route.json"])
 
-    @patch("route_optimizer._load_env")
+    @patch("utils.cli.load_env")
     def test_raises_when_input_file_invalid_json(
         self, mock_load_env: MagicMock, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -811,7 +807,7 @@ class TestMainEdgeCases:
         with pytest.raises(json.JSONDecodeError):
             main(["--input", str(bad_file)])
 
-    @patch("route_optimizer._load_env")
+    @patch("utils.cli.load_env")
     def test_raises_when_input_has_invalid_location(
         self, mock_load_env: MagicMock, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:

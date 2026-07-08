@@ -12,7 +12,7 @@ from main import app
 from route_optimizer import Location, build_distance_matrix_ors, optimize_route
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-ROUTE_JSON = PROJECT_ROOT / "route.json"
+ROUTE_JSON = PROJECT_ROOT / "utils" / "samples" / "route.json"
 EXAMPLE_REQUEST = PROJECT_ROOT / "examples" / "optimize.request.json"
 
 MINIMAL_LOCATIONS = [

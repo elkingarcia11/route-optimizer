@@ -1,6 +1,43 @@
+# Git and CI
+.git/
+.github/
+.gitignore
+.dockerignore
+
+# Local secrets and env
 .env
+.env.*
+!.env.example
+
+# Python runtime artifacts
 .venv/
 __pycache__/
-*.pyc
-.git/
-.gitignore
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# Cache and logs
+.cache/
+*.log
+
+# Dev / test / docs (not used by the production image)
+tests/
+utils/
+examples/
+pytest.ini
+requirements.txt
+README.md
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo

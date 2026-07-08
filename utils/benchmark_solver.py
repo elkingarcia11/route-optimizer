@@ -11,18 +11,14 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from dotenv import load_dotenv
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from route_optimizer import (  # noqa: E402
-    Location,
-    _resolve_api_key,
-    build_distance_matrix_ors,
-)
+from route_optimizer import Location, build_distance_matrix_ors  # noqa: E402
+from utils.ors_config import load_env, resolve_api_key  # noqa: E402
 
 METAHEURISTICS = {
     "gls": (
@@ -343,7 +339,7 @@ def main() -> None:
     parser.add_argument(
         "--routes",
         type=Path,
-        default=ROOT / "routes.json",
+        default=ROOT / "utils" / "samples" / "routes.json",
         help="Route payload with start, stops, and end.",
     )
     parser.add_argument(
@@ -376,8 +372,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    load_dotenv(ROOT / ".env")
-    api_key = _resolve_api_key(None)
+    load_env()
+    api_key = resolve_api_key(None)
 
     start, stops, end, profile = load_routes(args.routes)
     locations = [start, *stops, end]

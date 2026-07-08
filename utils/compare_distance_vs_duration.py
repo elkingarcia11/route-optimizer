@@ -9,22 +9,14 @@ import sys
 import time
 from pathlib import Path
 
-from dotenv import load_dotenv
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from route_optimizer import (  # noqa: E402
-    DEFAULT_ORS_CHUNK_SIZE,
-    ORS_MATRIX_PAIR_LIMIT,
-    Location,
-    _ors_distance_to_int,
-    _resolve_api_key,
-)
-
-import openrouteservice  # noqa: E402
+from route_optimizer import Location, build_route_matrices_ors  # noqa: E402
+from utils.ors_config import load_env, resolve_api_key  # noqa: E402
 
 
 def load_routes(path: Path) -> tuple[list[Location], str]:
@@ -34,49 +26,6 @@ def load_routes(path: Path) -> tuple[list[Location], str]:
     stops = [Location.from_value(stop) for stop in data["stops"]]
     profile = str(data.get("profile", "driving-car"))
     return [start, *stops, end], profile
-
-
-def build_matrices_ors(
-    locations: list[Location],
-    *,
-    api_key: str,
-    profile: str,
-    chunk_size: int = DEFAULT_ORS_CHUNK_SIZE,
-) -> tuple[list[list[int]], list[list[int]]]:
-    n = len(locations)
-    distance_matrix = [[0] * n for _ in range(n)]
-    duration_matrix = [[0] * n for _ in range(n)]
-    ors_locations = [loc.to_ors() for loc in locations]
-    client = openrouteservice.Client(key=api_key)
-
-    for src_start in range(0, n, chunk_size):
-        sources = list(range(src_start, min(src_start + chunk_size, n)))
-        for dst_start in range(0, n, chunk_size):
-            destinations = list(range(dst_start, min(dst_start + chunk_size, n)))
-            pair_count = len(sources) * len(destinations)
-            if pair_count > ORS_MATRIX_PAIR_LIMIT:
-                raise RuntimeError(f"Matrix chunk exceeds ORS limit ({pair_count}).")
-
-            response = client.distance_matrix(
-                locations=ors_locations,
-                profile=profile,
-                sources=sources,
-                destinations=destinations,
-                metrics=["distance", "duration"],
-                units="m",
-            )
-            distances = response["distances"]
-            durations = response["durations"]
-            for i, src_idx in enumerate(sources):
-                for j, dst_idx in enumerate(destinations):
-                    distance_matrix[src_idx][dst_idx] = _ors_distance_to_int(
-                        distances[i][j], src_idx, dst_idx
-                    )
-                    duration_matrix[src_idx][dst_idx] = _ors_distance_to_int(
-                        durations[i][j], src_idx, dst_idx
-                    )
-
-    return distance_matrix, duration_matrix
 
 
 def solve_route(
@@ -163,7 +112,11 @@ def stop_labels(locations: list[Location], ordered_indices: list[int]) -> list[s
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--routes", type=Path, default=ROOT / "routes.json")
+    parser.add_argument(
+        "--routes",
+        type=Path,
+        default=ROOT / "utils" / "samples" / "routes.json",
+    )
     parser.add_argument(
         "--cache",
         type=Path,
@@ -173,8 +126,8 @@ def main() -> None:
     parser.add_argument("--refresh-matrix", action="store_true")
     args = parser.parse_args()
 
-    load_dotenv(ROOT / ".env")
-    api_key = _resolve_api_key(None)
+    load_env()
+    api_key = resolve_api_key(None)
     locations, profile = load_routes(args.routes)
 
     print(f"Locations: {len(locations)} | Profile: {profile} | Solver: GLS {args.time_limit}s")
@@ -187,7 +140,7 @@ def main() -> None:
     else:
         print("Fetching distance + duration matrices from OpenRouteService...")
         started = time.perf_counter()
-        distance_matrix, duration_matrix = build_matrices_ors(
+        distance_matrix, duration_matrix = build_route_matrices_ors(
             locations,
             api_key=api_key,
             profile=profile,

@@ -1,25 +1,27 @@
 # Route Optimizer
 
-Optimize a single route from a fixed start through all stops to a fixed end, using real road distances.
+Optimize a single route from a fixed start through all stops to a fixed end, using real road networks from OpenRouteService.
 
-Given **start**, **end**, and at least **two stops** (HTTP API) or coordinates (CLI), the service finds the best visit order on real roads using OpenRouteService and Google OR-Tools.
+Given **start**, **end**, and at least **two stops** (HTTP API) or coordinates (CLI), the service finds the visit order that **minimizes total drive time** using Google OR-Tools.
 
 ## How it works
 
-1. **OpenRouteService** builds a road distance matrix (meters) between all locations.
-2. **Google OR-Tools** solves the routing problem and returns the optimized visit order.
+1. **OpenRouteService** builds road **distance** (meters) and **duration** (seconds) matrices between all locations.
+2. **Google OR-Tools** minimizes total **drive time** (Guided Local Search, 5s default) and returns the optimized visit order.
+3. The response reports both **total drive time** and **total road distance** for the resulting route.
 
-Distances are based on actual road networks, not straight-line distance.
+Routes are based on actual road networks, not straight-line distance.
 
 ## Project layout
 
 | File | Purpose |
 |---|---|
 | `main.py` | FastAPI HTTP service (Docker entrypoint) |
-| `route_optimizer.py` | Core optimizer + CLI |
-| `route.json` | Example CLI input with addresses |
+| `route_optimizer.py` | Core optimizer (`optimize_route`) used by the API |
 | `examples/` | Sample HTTP request/response JSON payloads |
-| `tests/test_route_optimizer.py` | Core optimizer + CLI unit tests |
+| `utils/` | Optional CLI, benchmarks, multi-route helpers, and sample data (not shipped in Docker) |
+| `utils/samples/` | Example CLI input files (`route.json`, `routes.json`) |
+| `tests/test_route_optimizer.py` | Core optimizer unit tests |
 | `tests/test_main.py` | FastAPI endpoint unit tests |
 | `tests/test_live_integration.py` | Live OpenRouteService integration tests |
 | `pytest.ini` | Pytest config (unit tests run by default) |
@@ -138,11 +140,11 @@ The HTTP API uses the same shape as Go `core.Address`:
 | `zipcode` | string | Postal code |
 | `location` | object | GeoJSON point (`type`, `coordinates`) |
 | `location.coordinates` | `[number, number]` | `[longitude, latitude]` |
-| `verification` | object | Optional Google verification metadata |
-| `verification.is_verified` | boolean | Whether the address is verified |
-| `verification.verified_at` | string | Verification timestamp |
+| `verification` | object | Optional pass-through metadata (not used for routing) |
+| `verification.is_verified` | boolean | Whether the address is verified upstream |
+| `verification.verified_at` | string | Verification timestamp (ISO-8601) |
 
-Response addresses include all input fields plus `routeOrder` (1-based visit position).
+Response addresses include all input fields plus `routeOrder` (1-based visit position: start = 1, stops follow, end = last).
 
 ### Request — `POST /optimize`
 
@@ -160,19 +162,20 @@ Response addresses include all input fields plus `routeOrder` (1-based visit pos
     "address1": "2249 Washington Ave",
     "city": "Bronx",
     "state": "NY",
-    "zipcode": "10451",
+    "zipcode": "10457",
     "location": {
       "type": "Point",
-      "coordinates": [-73.8955, 40.8515]
+      "coordinates": [-73.89406, 40.854388]
     }
   },
   "end": {
-    "address1": "1101 Forest Ave",
+    "address1": "2249 Washington Ave",
     "city": "Bronx",
     "state": "NY",
+    "zipcode": "10457",
     "location": {
       "type": "Point",
-      "coordinates": [-73.90774, 40.88467]
+      "coordinates": [-73.89406, 40.854388]
     }
   },
   "stops": [
@@ -213,22 +216,26 @@ Optional address fields: `address2`, `apartment`, `country`, and `verification` 
       "state": "NY",
       "location": {
         "type": "Point",
-        "coordinates": [-73.8955, 40.8515]
+        "coordinates": [-73.89406, 40.854388]
       },
       "routeOrder": 1
     }
   ],
-  "totalDistanceMeters": 7509
+  "totalDistanceMeters": 7509,
+  "totalDurationSeconds": 892
 }
 ```
 
 | Field | Description |
 |---|---|
-| `addresses` | Start, stops, and end in optimized visit order |
-| `routeOrder` | 1-based position in the route |
-| `totalDistanceMeters` | Total road distance in meters |
+| `addresses` | Start, stops, and end in time-optimized visit order |
+| `routeOrder` | 1-based position in the route (map to stop sequence, e.g. `pickup.routeNumber`) |
+| `totalDurationSeconds` | Total drive time in seconds (optimization objective) |
+| `totalDistanceMeters` | Total road distance in meters (reporting) |
 
 ### Go client
+
+Map each stop's `routeOrder` to your domain model (e.g. `pickup.routeNumber`). Skip start/end if those are depot-only and not pickups.
 
 ```go
 POST http://route-optimizer:8000/optimize
@@ -247,7 +254,7 @@ Optional container env vars:
 | Variable | Default | Description |
 |---|---|---|
 | `ROUTE_OPTIMIZER_PROFILE` | `driving-car` | ORS travel profile |
-| `ROUTE_OPTIMIZER_TIME_LIMIT` | `15` | OR-Tools solver time limit (seconds) |
+| `ROUTE_OPTIMIZER_TIME_LIMIT` | `5` | OR-Tools solver time limit (seconds) |
 
 Run locally without Docker:
 
@@ -314,14 +321,20 @@ Create `route.json`. Each location can include address fields for labeling (only
     "zip": ""
   },
   "profile": "driving-car",
-  "time_limit_seconds": 15
+  "time_limit_seconds": 5
 }
 ```
 
 Legacy `[lat, lng]` arrays are still supported for start, end, and stops.
 
 ```bash
-python route_optimizer.py --input route.json
+python route_optimizer.py --input utils/samples/route.json
+```
+
+Or run the CLI module directly:
+
+```bash
+python -m utils.cli --input utils/samples/route.json
 ```
 
 ### Python module
@@ -340,6 +353,7 @@ result = optimize_route(
 )
 
 print(result["ordered_locations"])
+print(result["total_duration_seconds"])
 print(result["total_distance_meters"])
 ```
 
@@ -362,6 +376,8 @@ print(result["total_distance_meters"])
   "ordered_indices": [0, 2, 1, 3],
   "stop_order": [1, 0],
   "total_distance_meters": 21220,
+  "total_duration_seconds": 3840,
+  "optimization_metric": "duration",
   "distance_source": "openrouteservice",
   "profile": "driving-car"
 }
@@ -377,7 +393,7 @@ print(result["total_distance_meters"])
 | `--input`, `-i` | — | JSON input file |
 | `--api-key` | from `.env` | OpenRouteService API key |
 | `--profile` | `driving-car` | Travel mode |
-| `--time-limit` | `15` | OR-Tools solver time limit (seconds) |
+| `--time-limit` | `5` | OR-Tools solver time limit (seconds) |
 
 ### Travel profiles
 

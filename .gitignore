@@ -1,8 +1,11 @@
 # Local secrets and CLI config
 .env
+.env.*
+!.env.example
 
 # Benchmark / runtime cache
 .cache/
+
 # Python
 .venv/
 __pycache__/
@@ -17,7 +20,12 @@ htmlcov/
 dist/
 build/
 
+# Logs
+*.log
+
 # OS / editor
 .DS_Store
 .idea/
 .vscode/
+*.swp
+*.swo
