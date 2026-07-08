@@ -166,7 +166,12 @@ class TestBuildDistanceMatrixOrs:
                 [0.0, 1000.4, 2000.6],
                 [1100.0, 0.0, 500.0],
                 [2100.0, 600.0, 0.0],
-            ]
+            ],
+            "durations": [
+                [0.0, 120.0, 240.0],
+                [130.0, 0.0, 60.0],
+                [250.0, 70.0, 0.0],
+            ],
         }
 
         locations = [
@@ -190,7 +195,7 @@ class TestBuildDistanceMatrixOrs:
             [-73.2, 40.2],
         ]
         assert call_kwargs["profile"] == "driving-car"
-        assert call_kwargs["metrics"] == ["distance"]
+        assert call_kwargs["metrics"] == ["distance", "duration"]
         assert call_kwargs["units"] == "m"
 
     @patch("route_optimizer.openrouteservice.Client")
@@ -204,7 +209,7 @@ class TestBuildDistanceMatrixOrs:
             rows = []
             for src in sources:
                 rows.append([abs(src - dst) * 100 for dst in destinations])
-            return {"distances": rows}
+            return {"distances": rows, "durations": rows}
 
         mock_client.distance_matrix.side_effect = fake_matrix
 
@@ -223,9 +228,12 @@ class TestOptimizeRoute:
     STOP_B = Location(lat=40.2, lng=-73.2)
     END = Location(lat=40.3, lng=-73.3)
 
-    @patch("route_optimizer.build_distance_matrix_ors")
-    def test_start_to_end_only(self, mock_build_matrix: MagicMock) -> None:
-        mock_build_matrix.return_value = [[0, 5000], [5000, 0]]
+    @patch("route_optimizer.build_route_matrices_ors")
+    def test_start_to_end_only(self, mock_build_matrices: MagicMock) -> None:
+        mock_build_matrices.return_value = (
+            [[0, 5000], [5000, 0]],
+            [[0, 900], [900, 0]],
+        )
 
         result = optimize_route(
             self.START,
@@ -237,6 +245,8 @@ class TestOptimizeRoute:
         assert result["ordered_indices"] == [0, 1]
         assert result["stop_order"] == []
         assert result["total_distance_meters"] == 5000
+        assert result["total_duration_seconds"] == 900
+        assert result["optimization_metric"] == "duration"
         assert result["distance_source"] == "openrouteservice"
         assert result["profile"] == "driving-car"
         assert result["ordered_coordinates"] == [
@@ -245,15 +255,16 @@ class TestOptimizeRoute:
         ]
         assert len(result["ordered_locations"]) == 2
 
-    @patch("route_optimizer.build_distance_matrix_ors")
-    def test_reorders_stops_by_shortest_path(self, mock_build_matrix: MagicMock) -> None:
+    @patch("route_optimizer.build_route_matrices_ors")
+    def test_reorders_stops_by_shortest_path(self, mock_build_matrices: MagicMock) -> None:
         # Indices: 0=start, 1=stop_a, 2=stop_b, 3=end
-        mock_build_matrix.return_value = [
+        matrix = [
             [0, 100, 500, 200],
             [100, 0, 150, 300],
             [500, 150, 0, 100],
             [200, 300, 100, 0],
         ]
+        mock_build_matrices.return_value = (matrix, matrix)
 
         result = optimize_route(
             self.START,
@@ -268,9 +279,9 @@ class TestOptimizeRoute:
         assert result["total_distance_meters"] > 0
         assert len(result["ordered_locations"]) == 4
 
-    @patch("route_optimizer.build_distance_matrix_ors")
-    def test_distance_callback_uses_matrix(
-        self, mock_build_matrix: MagicMock
+    @patch("route_optimizer.build_route_matrices_ors")
+    def test_duration_callback_uses_matrix(
+        self, mock_build_matrices: MagicMock
     ) -> None:
         matrix = [
             [0, 100, 500, 200],
@@ -278,7 +289,7 @@ class TestOptimizeRoute:
             [500, 150, 0, 100],
             [200, 300, 100, 0],
         ]
-        mock_build_matrix.return_value = matrix
+        mock_build_matrices.return_value = (matrix, matrix)
 
         result = optimize_route(
             self.START,
@@ -289,6 +300,7 @@ class TestOptimizeRoute:
 
         # PATH_CHEAPEST_ARC on this matrix: 0->1 (100) + 1->2 (150) + 2->3 (100)
         assert result["total_distance_meters"] == 350
+        assert result["total_duration_seconds"] == 350
 
 
 class TestComputeVrpTimeLimit:
@@ -616,7 +628,10 @@ class TestBuildDistanceMatrixOrsEdgeCases:
     def test_single_location_matrix(self, mock_client_cls: MagicMock) -> None:
         mock_client = MagicMock()
         mock_client_cls.return_value = mock_client
-        mock_client.distance_matrix.return_value = {"distances": [[0.0]]}
+        mock_client.distance_matrix.return_value = {
+            "distances": [[0.0]],
+            "durations": [[0.0]],
+        }
 
         matrix = build_distance_matrix_ors(
             [Location(lat=40.0, lng=-73.0)], api_key="key"
@@ -630,7 +645,8 @@ class TestBuildDistanceMatrixOrsEdgeCases:
         mock_client = MagicMock()
         mock_client_cls.return_value = mock_client
         mock_client.distance_matrix.return_value = {
-            "distances": [[0.0, None], [100.0, 0.0]]
+            "distances": [[0.0, None], [100.0, 0.0]],
+            "durations": [[0.0, None], [100.0, 0.0]],
         }
 
         locations = [
@@ -647,17 +663,18 @@ class TestOptimizeRouteEdgeCases:
     STOP_B = Location(lat=40.2, lng=-73.2)
     END = Location(lat=40.3, lng=-73.3)
 
-    @patch("route_optimizer.build_distance_matrix_ors")
+    @patch("route_optimizer.build_route_matrices_ors")
     def test_reorders_stops_when_input_order_is_suboptimal(
-        self, mock_build_matrix: MagicMock
+        self, mock_build_matrices: MagicMock
     ) -> None:
         # Cheapest path is start -> stop_b -> stop_a -> end (indices 0, 2, 1, 3)
-        mock_build_matrix.return_value = [
+        matrix = [
             [0, 500, 50, 200],
             [500, 0, 50, 200],
             [50, 50, 0, 50],
             [200, 200, 50, 0],
         ]
+        mock_build_matrices.return_value = (matrix, matrix)
 
         result = optimize_route(
             self.START,
@@ -670,21 +687,22 @@ class TestOptimizeRouteEdgeCases:
         assert result["stop_order"] == [1, 0]
         assert result["total_distance_meters"] == 300
 
-    @patch("route_optimizer.build_distance_matrix_ors")
+    @patch("route_optimizer.build_route_matrices_ors")
     @patch("route_optimizer.pywrapcp.RoutingModel")
     @patch("route_optimizer.pywrapcp.RoutingIndexManager")
     def test_raises_when_solver_finds_no_solution(
         self,
         mock_manager_cls: MagicMock,
         mock_routing_model_cls: MagicMock,
-        mock_build_matrix: MagicMock,
+        mock_build_matrices: MagicMock,
     ) -> None:
-        mock_build_matrix.return_value = [
+        matrix = [
             [0, 100, 100, 100],
             [100, 0, 100, 100],
             [100, 100, 0, 100],
             [100, 100, 100, 0],
         ]
+        mock_build_matrices.return_value = (matrix, matrix)
         mock_routing = MagicMock()
         mock_routing.SolveWithParameters.return_value = None
         mock_routing_model_cls.return_value = mock_routing

@@ -1,6 +1,8 @@
 # Local secrets and CLI config
 .env
 
+# Benchmark / runtime cache
+.cache/
 # Python
 .venv/
 __pycache__/

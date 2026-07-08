@@ -40,7 +40,7 @@ def _address(
     }
 
 
-def _single_route_payload(
+def _optimize_payload(
     *,
     start: dict,
     end: dict,
@@ -51,25 +51,6 @@ def _single_route_payload(
         "start": start,
         "end": end,
         "stops": stops,
-    }
-    if api_key is not None:
-        payload["apiKey"] = api_key
-    return payload
-
-
-def _balance_routes_payload(
-    *,
-    start: dict,
-    end: dict,
-    stops: list[dict],
-    num_routes: int = 2,
-    api_key: str | None = "test-api-key",
-) -> dict:
-    payload: dict = {
-        "start": start,
-        "end": end,
-        "stops": stops,
-        "numRoutes": num_routes,
     }
     if api_key is not None:
         payload["apiKey"] = api_key
@@ -161,46 +142,37 @@ class TestOpenApiDocs:
         assert response.status_code == 200
         schema = response.json()
         assert schema["info"]["title"] == "Route Optimizer API"
-        assert "/routes/single" in schema["paths"]
-        assert "/routes/balance" in schema["paths"]
-        assert "/optimize" not in schema["paths"]
-        single_post = schema["paths"]["/routes/single"]["post"]
-        assert single_post["summary"] == "Optimize a single route"
-        assert "422" in single_post["responses"]
-        single_props = schema["components"]["schemas"]["SingleRouteRequest"]["properties"]
-        single_required = schema["components"]["schemas"]["SingleRouteRequest"]["required"]
-        assert "apiKey" in single_props
-        assert "start" in single_props
-        assert "end" in single_props
-        assert "stops" in single_props
-        assert set(single_required) >= {"apiKey", "start", "end", "stops"}
-        balance_props = schema["components"]["schemas"]["BalanceRoutesRequest"]["properties"]
-        assert "numRoutes" in balance_props
+        assert "/optimize" in schema["paths"]
+        assert "/routes/single" not in schema["paths"]
+        assert "/routes/balance" not in schema["paths"]
+        optimize_post = schema["paths"]["/optimize"]["post"]
+        assert optimize_post["summary"] == "Optimize route order"
+        assert "422" in optimize_post["responses"]
+        props = schema["components"]["schemas"]["OptimizeRequest"]["properties"]
+        required = schema["components"]["schemas"]["OptimizeRequest"]["required"]
+        assert "apiKey" in props
+        assert "start" in props
+        assert "end" in props
+        assert "stops" in props
+        assert set(required) >= {"apiKey", "start", "end", "stops"}
         response_props = schema["components"]["schemas"]["OptimizeResponse"]["properties"]
-        assert "routes" in response_props
-        assert "numRoutes" in response_props
+        assert "addresses" in response_props
         assert "totalDistanceMeters" in response_props
-        route_props = schema["components"]["schemas"]["RouteResult"]["properties"]
-        assert "routeNumber" in route_props
-        assert "addresses" in route_props
-        assert "distanceMeters" in route_props
-        assert schema["info"]["version"] == "2.0.0"
+        assert "totalDurationSeconds" in response_props
+        assert schema["info"]["version"] == "2.2.0"
 
 
-class TestSingleRouteEndpoint:
+class TestOptimizeEndpoint:
     START = _address(-73.8955, 40.8515, address1="Depot", city="Bronx", state="NY")
     STOP_A = _address(-73.91335, 40.87995, address1="Stop A", city="Bronx", state="NY")
     STOP_B = _address(-73.90774, 40.88467, address1="Stop B", city="Bronx", state="NY")
     END = _address(-73.90774, 40.88467, address1="End", city="Bronx", state="NY")
     TWO_STOPS = [STOP_A, STOP_B]
 
-    def test_returns_422_when_api_key_missing(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv("ORS_API_KEY", raising=False)
+    def test_returns_422_when_api_key_missing(self, client: TestClient) -> None:
         response = client.post(
-            "/routes/single",
-            json=_single_route_payload(
+            "/optimize",
+            json=_optimize_payload(
                 start=self.START,
                 end=self.END,
                 stops=self.TWO_STOPS,
@@ -211,14 +183,11 @@ class TestSingleRouteEndpoint:
         detail = response.json()["detail"]
         assert any(err["loc"] == ["body", "apiKey"] for err in detail)
 
-    def test_returns_422_when_api_key_empty(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv("ORS_API_KEY", raising=False)
+    def test_returns_422_when_api_key_empty(self, client: TestClient) -> None:
         response = client.post(
-            "/routes/single",
+            "/optimize",
             json={
-                **_single_route_payload(
+                **_optimize_payload(
                     start=self.START,
                     end=self.END,
                     stops=self.TWO_STOPS,
@@ -231,8 +200,8 @@ class TestSingleRouteEndpoint:
 
     def test_returns_422_for_invalid_location(self, client: TestClient) -> None:
         response = client.post(
-            "/routes/single",
-            json=_single_route_payload(
+            "/optimize",
+            json=_optimize_payload(
                 start=self.START,
                 end=self.END,
                 stops=[
@@ -245,8 +214,8 @@ class TestSingleRouteEndpoint:
 
     def test_returns_422_when_stops_empty(self, client: TestClient) -> None:
         response = client.post(
-            "/routes/single",
-            json=_single_route_payload(
+            "/optimize",
+            json=_optimize_payload(
                 start=self.START,
                 end=self.END,
                 stops=[],
@@ -258,8 +227,8 @@ class TestSingleRouteEndpoint:
 
     def test_returns_422_when_only_one_stop(self, client: TestClient) -> None:
         response = client.post(
-            "/routes/single",
-            json=_single_route_payload(
+            "/optimize",
+            json=_optimize_payload(
                 start=self.START,
                 end=self.END,
                 stops=[self.STOP_A],
@@ -270,41 +239,36 @@ class TestSingleRouteEndpoint:
         assert any(err["loc"] == ["body", "stops"] for err in detail)
 
     @patch("main.optimize_route")
-    def test_returns_optimized_single_route(
+    def test_returns_optimized_route(
         self,
         mock_optimize_route,
         client: TestClient,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setenv("ORS_API_KEY", "test-api-key")
         mock_optimize_route.return_value = {
             "ordered_indices": [0, 2, 1, 3],
             "total_distance_meters": 12345,
+            "total_duration_seconds": 987,
         }
 
         response = client.post(
-            "/routes/single",
-            json=_single_route_payload(
+            "/optimize",
+            json=_optimize_payload(
                 start=self.START,
                 end=self.END,
-                stops=[self.STOP_A, self.STOP_B],
+                stops=self.TWO_STOPS,
                 api_key="test-api-key",
             ),
         )
 
         assert response.status_code == 200
         body = response.json()
-        assert body["numRoutes"] == 1
         assert body["totalDistanceMeters"] == 12345
-        assert len(body["routes"]) == 1
-        route = body["routes"][0]
-        assert route["routeNumber"] == 1
-        assert route["distanceMeters"] == 12345
-        assert [addr["routeOrder"] for addr in route["addresses"]] == [1, 2, 3, 4]
-        assert route["addresses"][0]["address1"] == "Depot"
-        assert route["addresses"][1]["address1"] == "Stop B"
-        assert route["addresses"][2]["address1"] == "Stop A"
-        assert route["addresses"][3]["address1"] == "End"
+        assert body["totalDurationSeconds"] == 987
+        assert [addr["routeOrder"] for addr in body["addresses"]] == [1, 2, 3, 4]
+        assert body["addresses"][0]["address1"] == "Depot"
+        assert body["addresses"][1]["address1"] == "Stop B"
+        assert body["addresses"][2]["address1"] == "Stop A"
+        assert body["addresses"][3]["address1"] == "End"
 
         mock_optimize_route.assert_called_once()
         start, stops, end = mock_optimize_route.call_args.args[:3]
@@ -340,107 +304,17 @@ class TestSingleRouteEndpoint:
             ),
         ]
 
-    @patch("main.optimize_balanced_multi_route")
-    def test_returns_balanced_multi_route(
-        self,
-        mock_optimize_balanced,
-        client: TestClient,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setenv("ORS_API_KEY", "test-api-key")
-        mock_optimize_balanced.return_value = {
-            "routes": [
-                {
-                    "route_number": 1,
-                    "ordered_indices": [0, 1, 0],
-                    "distance_meters": 8000,
-                },
-                {
-                    "route_number": 2,
-                    "ordered_indices": [0, 2, 0],
-                    "distance_meters": 7500,
-                },
-            ],
-            "total_distance_meters": 15500,
-        }
-
-        response = client.post(
-            "/routes/balance",
-            json=_balance_routes_payload(
-                start=self.START,
-                end=self.START,
-                stops=[self.STOP_A, self.STOP_B],
-                api_key="test-api-key",
-            ),
-        )
-
-        assert response.status_code == 200
-        body = response.json()
-        assert body["numRoutes"] == 2
-        assert body["totalDistanceMeters"] == 15500
-        assert len(body["routes"]) == 2
-
-        route1 = body["routes"][0]
-        assert route1["routeNumber"] == 1
-        assert route1["distanceMeters"] == 8000
-        assert route1["addresses"][0]["address1"] == "Depot"
-        assert route1["addresses"][1]["address1"] == "Stop A"
-        assert route1["addresses"][2]["address1"] == "Depot"
-
-        route2 = body["routes"][1]
-        assert route2["routeNumber"] == 2
-        assert route2["addresses"][1]["address1"] == "Stop B"
-
-        mock_optimize_balanced.assert_called_once()
-        depot, stops = mock_optimize_balanced.call_args.args[:2]
-        assert mock_optimize_balanced.call_args.args[2] == 2
-        assert depot.lat == 40.8515
-        assert len(stops) == 2
-
-    def test_returns_422_when_multi_route_start_end_differ(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("ORS_API_KEY", "test-api-key")
-        response = client.post(
-            "/routes/balance",
-            json=_balance_routes_payload(
-                start=self.START,
-                end=self.END,
-                stops=[self.STOP_A, self.STOP_B],
-            ),
-        )
-        assert response.status_code == 422
-        assert "same start and end" in response.json()["detail"]
-
-    def test_returns_422_when_too_many_routes_for_stops(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("ORS_API_KEY", "test-api-key")
-        response = client.post(
-            "/routes/balance",
-            json=_balance_routes_payload(
-                start=self.START,
-                end=self.START,
-                stops=self.TWO_STOPS,
-                num_routes=3,
-            ),
-        )
-        assert response.status_code == 422
-        assert "Cannot create 3 routes" in response.json()["detail"]
-
     @patch("main.optimize_route")
     def test_returns_502_when_optimizer_fails(
         self,
         mock_optimize_route,
         client: TestClient,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setenv("ORS_API_KEY", "test-api-key")
         mock_optimize_route.side_effect = RuntimeError("No solution found.")
 
         response = client.post(
-            "/routes/single",
-            json=_single_route_payload(
+            "/optimize",
+            json=_optimize_payload(
                 start=self.START,
                 end=self.END,
                 stops=self.TWO_STOPS,
@@ -450,24 +324,6 @@ class TestSingleRouteEndpoint:
 
         assert response.status_code == 502
         assert response.json()["detail"] == "No solution found."
-
-    def test_returns_422_when_api_key_empty_in_payload(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv("ORS_API_KEY", raising=False)
-        response = client.post(
-            "/routes/single",
-            json={
-                **_single_route_payload(
-                    start=self.START,
-                    end=self.END,
-                    stops=self.TWO_STOPS,
-                    api_key=None,
-                ),
-                "apiKey": "  ",
-            },
-        )
-        assert response.status_code == 422
 
     @patch("main.optimize_route")
     def test_uses_api_key_from_payload(
@@ -480,11 +336,12 @@ class TestSingleRouteEndpoint:
         mock_optimize_route.return_value = {
             "ordered_indices": [0, 1, 2, 3],
             "total_distance_meters": 1000,
+            "total_duration_seconds": 120,
         }
 
         response = client.post(
-            "/routes/single",
-            json=_single_route_payload(
+            "/optimize",
+            json=_optimize_payload(
                 start=self.START,
                 end=self.END,
                 stops=self.TWO_STOPS,
@@ -495,34 +352,8 @@ class TestSingleRouteEndpoint:
         assert response.status_code == 200
         assert mock_optimize_route.call_args.kwargs["api_key"] == "payload-only-key"
 
-    @patch("main.optimize_route")
-    def test_passes_payload_api_key_to_optimizer(
-        self,
-        mock_optimize_route,
-        client: TestClient,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setenv("ORS_API_KEY", "env-key")
-        mock_optimize_route.return_value = {
-            "ordered_indices": [0, 1, 2, 3],
-            "total_distance_meters": 1000,
-        }
-
-        response = client.post(
-            "/routes/single",
-            json=_single_route_payload(
-                start=self.START,
-                end=self.END,
-                stops=self.TWO_STOPS,
-                api_key="payload-key",
-            ),
-        )
-
-        assert response.status_code == 200
-        assert mock_optimize_route.call_args.kwargs["api_key"] == "payload-key"
-
     def test_returns_422_when_required_fields_missing(self, client: TestClient) -> None:
-        response = client.post("/routes/single", json={})
+        response = client.post("/optimize", json={})
         assert response.status_code == 422
         detail = response.json()["detail"]
         assert any(err["loc"] == ["body", "start"] for err in detail)
@@ -532,8 +363,8 @@ class TestSingleRouteEndpoint:
 
     def test_returns_422_for_non_numeric_coordinates(self, client: TestClient) -> None:
         response = client.post(
-            "/routes/single",
-            json=_single_route_payload(
+            "/optimize",
+            json=_optimize_payload(
                 start={"location": {"type": "Point", "coordinates": ["a", "b"]}},
                 end=self.END,
                 stops=self.TWO_STOPS,
@@ -543,7 +374,7 @@ class TestSingleRouteEndpoint:
 
     def test_returns_422_for_invalid_json_body(self, client: TestClient) -> None:
         response = client.post(
-            "/routes/single",
+            "/optimize",
             content=b"not-json",
             headers={"Content-Type": "application/json"},
         )
@@ -554,16 +385,14 @@ class TestSingleRouteEndpoint:
         self,
         mock_optimize_route,
         client: TestClient,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setenv("ORS_API_KEY", "test-api-key")
         mock_optimize_route.side_effect = RuntimeError(
             "No route found between location 0 and 2."
         )
 
         response = client.post(
-            "/routes/single",
-            json=_single_route_payload(
+            "/optimize",
+            json=_optimize_payload(
                 start=self.START,
                 end=self.END,
                 stops=self.TWO_STOPS,
@@ -579,9 +408,7 @@ class TestSingleRouteEndpoint:
         self,
         mock_optimize_route,
         client: TestClient,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setenv("ORS_API_KEY", "test-api-key")
         stops = [
             _address(-73.89 + i * 0.001, 40.85 + i * 0.001, address1=f"Stop {i}")
             for i in range(55)
@@ -590,11 +417,12 @@ class TestSingleRouteEndpoint:
         mock_optimize_route.return_value = {
             "ordered_indices": ordered_indices,
             "total_distance_meters": 999999,
+            "total_duration_seconds": 99999,
         }
 
         response = client.post(
-            "/routes/single",
-            json=_single_route_payload(
+            "/optimize",
+            json=_optimize_payload(
                 start=self.START,
                 end=self.END,
                 stops=stops,
@@ -603,9 +431,9 @@ class TestSingleRouteEndpoint:
 
         assert response.status_code == 200
         body = response.json()
-        assert len(body["routes"][0]["addresses"]) == 57
-        assert body["routes"][0]["addresses"][0]["routeOrder"] == 1
-        assert body["routes"][0]["addresses"][-1]["routeOrder"] == 57
+        assert len(body["addresses"]) == 57
+        assert body["addresses"][0]["routeOrder"] == 1
+        assert body["addresses"][-1]["routeOrder"] == 57
         start, stops_loc, end = mock_optimize_route.call_args.args[:3]
         assert len(stops_loc) == 55
 
@@ -614,9 +442,7 @@ class TestSingleRouteEndpoint:
         self,
         mock_optimize_route,
         client: TestClient,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setenv("ORS_API_KEY", "test-api-key")
         start = {
             **_address(-73.8955, 40.8515, address1="Start"),
             "verification": {"is_verified": True, "verified_at": "2026-01-01T00:00:00Z"},
@@ -624,11 +450,12 @@ class TestSingleRouteEndpoint:
         mock_optimize_route.return_value = {
             "ordered_indices": [0, 1, 2, 3],
             "total_distance_meters": 1000,
+            "total_duration_seconds": 120,
         }
 
         response = client.post(
-            "/routes/single",
-            json=_single_route_payload(
+            "/optimize",
+            json=_optimize_payload(
                 start=start,
                 end=self.END,
                 stops=self.TWO_STOPS,
@@ -636,15 +463,15 @@ class TestSingleRouteEndpoint:
         )
 
         assert response.status_code == 200
-        assert response.json()["routes"][0]["addresses"][0]["verification"] == {
+        assert response.json()["addresses"][0]["verification"] == {
             "is_verified": True,
             "verified_at": "2026-01-01T00:00:00Z",
         }
 
     def test_returns_422_when_location_missing(self, client: TestClient) -> None:
         response = client.post(
-            "/routes/single",
-            json=_single_route_payload(
+            "/optimize",
+            json=_optimize_payload(
                 start={"address1": "Start", "city": "Bronx"},
                 end=self.END,
                 stops=self.TWO_STOPS,
@@ -657,9 +484,7 @@ class TestSingleRouteEndpoint:
         self,
         mock_optimize_route,
         client: TestClient,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setenv("ORS_API_KEY", "test-api-key")
         start = _address(
             -73.8955,
             40.8515,
@@ -674,11 +499,12 @@ class TestSingleRouteEndpoint:
         mock_optimize_route.return_value = {
             "ordered_indices": [0, 1, 2, 3],
             "total_distance_meters": 1000,
+            "total_duration_seconds": 120,
         }
 
         response = client.post(
-            "/routes/single",
-            json=_single_route_payload(
+            "/optimize",
+            json=_optimize_payload(
                 start=start,
                 end=self.END,
                 stops=self.TWO_STOPS,
@@ -686,7 +512,7 @@ class TestSingleRouteEndpoint:
         )
 
         assert response.status_code == 200
-        addr = response.json()["routes"][0]["addresses"][0]
+        addr = response.json()["addresses"][0]
         assert addr["address1"] == "123 Main St"
         assert addr["address2"] == "Floor 2"
         assert addr["apartment"] == "Unit 5"
@@ -698,78 +524,7 @@ class TestSingleRouteEndpoint:
 
     def test_returns_422_for_invalid_payload_shape(self, client: TestClient) -> None:
         response = client.post(
-            "/routes/single",
+            "/optimize",
             json={"addresses": [[-73.8955, 40.8515], [-73.90774, 40.88467]]},
         )
         assert response.status_code == 422
-
-
-class TestBalanceRoutesEndpoint:
-    DEPOT = TestSingleRouteEndpoint.START
-    TWO_STOPS = TestSingleRouteEndpoint.TWO_STOPS
-
-    @patch("main.optimize_balanced_multi_route")
-    def test_routes_balance_splits_stops(
-        self,
-        mock_optimize_balanced,
-        client: TestClient,
-    ) -> None:
-        mock_optimize_balanced.return_value = {
-            "routes": [
-                {
-                    "route_number": 1,
-                    "ordered_indices": [0, 1, 0],
-                    "distance_meters": 8000,
-                },
-                {
-                    "route_number": 2,
-                    "ordered_indices": [0, 2, 0],
-                    "distance_meters": 7500,
-                },
-            ],
-            "total_distance_meters": 15500,
-        }
-
-        response = client.post(
-            "/routes/balance",
-            json=_balance_routes_payload(
-                start=self.DEPOT,
-                end=self.DEPOT,
-                stops=self.TWO_STOPS,
-            ),
-        )
-
-        assert response.status_code == 200
-        body = response.json()
-        assert body["numRoutes"] == 2
-        assert body["totalDistanceMeters"] == 15500
-        mock_optimize_balanced.assert_called_once()
-
-    def test_routes_balance_requires_at_least_two_routes(
-        self, client: TestClient
-    ) -> None:
-        response = client.post(
-            "/routes/balance",
-            json={
-                "apiKey": "test-api-key",
-                "start": self.DEPOT,
-                "end": self.DEPOT,
-                "stops": self.TWO_STOPS,
-                "numRoutes": 1,
-            },
-        )
-        assert response.status_code == 422
-
-    def test_routes_balance_requires_matching_depot(
-        self, client: TestClient
-    ) -> None:
-        response = client.post(
-            "/routes/balance",
-            json=_balance_routes_payload(
-                start=self.DEPOT,
-                end=TestSingleRouteEndpoint.END,
-                stops=self.TWO_STOPS,
-            ),
-        )
-        assert response.status_code == 422
-        assert "same start and end" in response.json()["detail"]

@@ -9,17 +9,12 @@ from dotenv import load_dotenv
 from fastapi.testclient import TestClient
 
 from main import app
-from route_optimizer import (
-    Location,
-    build_distance_matrix_ors,
-    optimize_balanced_multi_route,
-    optimize_route,
-)
+from route_optimizer import Location, build_distance_matrix_ors, optimize_route
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ROUTE_JSON = PROJECT_ROOT / "route.json"
+EXAMPLE_REQUEST = PROJECT_ROOT / "examples" / "optimize.request.json"
 
-# Small Bronx route: start, two stops, end ([lon, lat])
 MINIMAL_LOCATIONS = [
     [-73.8955, 40.8515],
     [-73.91335, 40.87995],
@@ -79,37 +74,14 @@ def _assert_valid_address_route(
     address_count: int,
     ordered_addresses: list[dict],
     total_distance_meters: int,
+    total_duration_seconds: int,
 ) -> None:
     assert len(ordered_addresses) == address_count
     assert [addr["routeOrder"] for addr in ordered_addresses] == list(
         range(1, address_count + 1)
     )
     assert total_distance_meters > 0
-
-
-def _assert_valid_multi_route_response(
-    body: dict,
-    *,
-    num_routes: int,
-    stop_count: int,
-) -> None:
-    assert body["numRoutes"] == num_routes
-    assert len(body["routes"]) == num_routes
-    assert body["totalDistanceMeters"] > 0
-
-    visited_stops: set[str] = set()
-    for route in body["routes"]:
-        assert route["distanceMeters"] > 0
-        assert route["routeNumber"] >= 1
-        addresses = route["addresses"]
-        assert addresses[0]["address1"] == addresses[-1]["address1"]
-        assert [addr["routeOrder"] for addr in addresses] == list(
-            range(1, len(addresses) + 1)
-        )
-        for addr in addresses[1:-1]:
-            visited_stops.add(addr["address1"])
-
-    assert len(visited_stops) == stop_count
+    assert total_duration_seconds > 0
 
 
 pytestmark = pytest.mark.integration
@@ -153,38 +125,18 @@ class TestLiveOpenRouteService:
             result["ordered_indices"],
             result["total_distance_meters"],
         )
+        assert result["total_distance_meters"] > 0
+        assert result["total_duration_seconds"] > 0
+        assert result["optimization_metric"] == "duration"
         assert result["distance_source"] == "openrouteservice"
         assert len(result["ordered_locations"]) == len(MINIMAL_LOCATIONS)
-
-    def test_optimize_balanced_multi_route(self, api_key: str) -> None:
-        depot = Location(lat=MINIMAL_LOCATIONS[0][1], lng=MINIMAL_LOCATIONS[0][0])
-        stops = [
-            Location(lat=loc[1], lng=loc[0]) for loc in MINIMAL_LOCATIONS[1:-1]
-        ]
-
-        result = optimize_balanced_multi_route(
-            depot,
-            stops,
-            2,
-            api_key=api_key,
-            time_limit_seconds=30,
-        )
-
-        assert result["num_routes"] == 2
-        assert len(result["routes"]) == 2
-        assert result["total_distance_meters"] > 0
-        all_stop_orders = []
-        for route in result["routes"]:
-            assert route["distance_meters"] > 0
-            all_stop_orders.extend(route["stop_order"])
-        assert sorted(all_stop_orders) == list(range(len(stops)))
 
 
 class TestLiveHttpApi:
     def test_optimize_endpoint(self, api_key: str) -> None:
         client = TestClient(app)
         response = client.post(
-            "/routes/single",
+            "/optimize",
             json={
                 "start": START,
                 "end": END,
@@ -195,15 +147,33 @@ class TestLiveHttpApi:
 
         assert response.status_code == 200
         body = response.json()
-        assert body["numRoutes"] == 1
-        route = body["routes"][0]
         _assert_valid_address_route(
             len(STOPS) + 2,
-            route["addresses"],
+            body["addresses"],
             body["totalDistanceMeters"],
+            body["totalDurationSeconds"],
         )
-        assert route["addresses"][0]["address1"] == "Start"
-        assert route["addresses"][-1]["address1"] == "End"
+        assert body["addresses"][0]["address1"] == "Start"
+        assert body["addresses"][-1]["address1"] == "End"
+
+    def test_optimize_example_payload(self, api_key: str) -> None:
+        if not EXAMPLE_REQUEST.exists():
+            pytest.skip("examples/optimize.request.json not found")
+
+        payload = json.loads(EXAMPLE_REQUEST.read_text(encoding="utf-8"))
+        payload["apiKey"] = api_key
+
+        client = TestClient(app)
+        response = client.post("/optimize", json=payload)
+
+        assert response.status_code == 200
+        body = response.json()
+        _assert_valid_address_route(
+            len(payload["stops"]) + 2,
+            body["addresses"],
+            body["totalDistanceMeters"],
+            body["totalDurationSeconds"],
+        )
 
     def test_optimize_route_json_payload(self, api_key: str) -> None:
         if not ROUTE_JSON.exists():
@@ -246,7 +216,7 @@ class TestLiveHttpApi:
 
         client = TestClient(app)
         response = client.post(
-            "/routes/single",
+            "/optimize",
             json={
                 "start": start,
                 "end": end,
@@ -257,57 +227,10 @@ class TestLiveHttpApi:
 
         assert response.status_code == 200
         body = response.json()
-        route = body["routes"][0]
         _assert_valid_address_route(
             len(stops) + 2,
-            route["addresses"],
+            body["addresses"],
             body["totalDistanceMeters"],
+            body["totalDurationSeconds"],
         )
-        assert route["addresses"][0]["city"] == payload["start"]["city"]
-
-    def test_optimize_single_route_endpoint(self, api_key: str) -> None:
-        client = TestClient(app)
-        response = client.post(
-            "/routes/single",
-            json={
-                "start": START,
-                "end": END,
-                "stops": STOPS,
-                "apiKey": api_key,
-            },
-        )
-
-        assert response.status_code == 200
-        body = response.json()
-        assert body["numRoutes"] == 1
-        route = body["routes"][0]
-        _assert_valid_address_route(
-            len(STOPS) + 2,
-            route["addresses"],
-            body["totalDistanceMeters"],
-        )
-
-    def test_optimize_balanced_multi_route_endpoint(self, api_key: str) -> None:
-        client = TestClient(app)
-        depot = START
-        response = client.post(
-            "/routes/balance",
-            json={
-                "apiKey": api_key,
-                "start": depot,
-                "end": depot,
-                "stops": STOPS,
-                "numRoutes": 2,
-            },
-        )
-
-        assert response.status_code == 200
-        body = response.json()
-        _assert_valid_multi_route_response(
-            body,
-            num_routes=2,
-            stop_count=len(STOPS),
-        )
-        assert body["totalDistanceMeters"] == sum(
-            route["distanceMeters"] for route in body["routes"]
-        )
+        assert body["addresses"][0]["city"] == payload["start"]["city"]

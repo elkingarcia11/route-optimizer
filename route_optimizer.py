@@ -18,6 +18,7 @@ from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 # ORS matrix limit: sources x destinations <= 3500 per request.
 ORS_MATRIX_PAIR_LIMIT = 3500
 DEFAULT_ORS_CHUNK_SIZE = 50
+DEFAULT_TIME_LIMIT_SECONDS = 5
 
 
 @dataclass(frozen=True)
@@ -96,17 +97,17 @@ def _ors_distance_to_int(value: float | None, from_idx: int, to_idx: int) -> int
     return int(round(value))
 
 
-def build_distance_matrix_ors(
+def build_route_matrices_ors(
     locations: Sequence[Location],
     *,
     api_key: str,
     profile: str = "driving-car",
     chunk_size: int = DEFAULT_ORS_CHUNK_SIZE,
-) -> list[list[int]]:
-    """Build a road distance matrix (meters) via OpenRouteService."""
+) -> tuple[list[list[int]], list[list[int]]]:
+    """Build road distance (meters) and duration (seconds) matrices via ORS."""
     n = len(locations)
     if n == 0:
-        return []
+        return [], []
 
     if chunk_size * chunk_size > ORS_MATRIX_PAIR_LIMIT:
         raise ValueError(
@@ -115,7 +116,8 @@ def build_distance_matrix_ors(
         )
 
     ors_locations = [loc.to_ors() for loc in locations]
-    matrix = [[0] * n for _ in range(n)]
+    distance_matrix = [[0] * n for _ in range(n)]
+    duration_matrix = [[0] * n for _ in range(n)]
     client = openrouteservice.Client(key=api_key)
 
     for src_start in range(0, n, chunk_size):
@@ -134,17 +136,51 @@ def build_distance_matrix_ors(
                 profile=profile,
                 sources=sources,
                 destinations=destinations,
-                metrics=["distance"],
+                metrics=["distance", "duration"],
                 units="m",
             )
             distances = response["distances"]
+            durations = response["durations"]
             for i, src_idx in enumerate(sources):
                 for j, dst_idx in enumerate(destinations):
-                    matrix[src_idx][dst_idx] = _ors_distance_to_int(
+                    distance_matrix[src_idx][dst_idx] = _ors_distance_to_int(
                         distances[i][j], src_idx, dst_idx
                     )
+                    duration_matrix[src_idx][dst_idx] = _ors_distance_to_int(
+                        durations[i][j], src_idx, dst_idx
+                    )
 
-    return matrix
+    return distance_matrix, duration_matrix
+
+
+def build_distance_matrix_ors(
+    locations: Sequence[Location],
+    *,
+    api_key: str,
+    profile: str = "driving-car",
+    chunk_size: int = DEFAULT_ORS_CHUNK_SIZE,
+) -> list[list[int]]:
+    """Build a road distance matrix (meters) via OpenRouteService."""
+    distance_matrix, _ = build_route_matrices_ors(
+        locations,
+        api_key=api_key,
+        profile=profile,
+        chunk_size=chunk_size,
+    )
+    return distance_matrix
+
+
+def _route_leg_totals(
+    ordered_indices: Sequence[int],
+    distance_matrix: list[list[int]],
+    duration_matrix: list[list[int]],
+) -> tuple[int, int]:
+    total_distance = 0
+    total_duration = 0
+    for left, right in zip(ordered_indices, ordered_indices[1:]):
+        total_distance += distance_matrix[left][right]
+        total_duration += duration_matrix[left][right]
+    return total_distance, total_duration
 
 
 def optimize_route(
@@ -154,24 +190,27 @@ def optimize_route(
     *,
     api_key: str,
     profile: str = "driving-car",
-    time_limit_seconds: int = 5,
+    time_limit_seconds: int = DEFAULT_TIME_LIMIT_SECONDS,
     ors_chunk_size: int = DEFAULT_ORS_CHUNK_SIZE,
 ) -> dict:
     """
     Visit every stop exactly once, starting at `start` and finishing at `end`.
 
-    Distances come from OpenRouteService; routing is solved with OR-Tools.
+    Matrices come from OpenRouteService. OR-Tools minimizes total drive time;
+    the response includes both total drive time and total road distance.
     """
     locations = [start, *stops, end]
 
     if len(locations) == 2:
-        distance_matrix = build_distance_matrix_ors(
+        distance_matrix, duration_matrix = build_route_matrices_ors(
             locations,
             api_key=api_key,
             profile=profile,
             chunk_size=ors_chunk_size,
         )
-        total_distance = distance_matrix[0][1]
+        total_distance, total_duration = _route_leg_totals(
+            [0, 1], distance_matrix, duration_matrix
+        )
         ordered_locations = [start.to_dict(), end.to_dict()]
         return {
             "ordered_locations": ordered_locations,
@@ -182,11 +221,13 @@ def optimize_route(
             "ordered_indices": [0, 1],
             "stop_order": [],
             "total_distance_meters": total_distance,
+            "total_duration_seconds": total_duration,
+            "optimization_metric": "duration",
             "distance_source": "openrouteservice",
             "profile": profile,
         }
 
-    distance_matrix = build_distance_matrix_ors(
+    distance_matrix, duration_matrix = build_route_matrices_ors(
         locations,
         api_key=api_key,
         profile=profile,
@@ -204,12 +245,12 @@ def optimize_route(
     )
     routing = pywrapcp.RoutingModel(manager)
 
-    def distance_callback(from_index: int, to_index: int) -> int:
+    def duration_callback(from_index: int, to_index: int) -> int:
         from_node = manager.IndexToNode(from_index)
         to_node = manager.IndexToNode(to_index)
-        return distance_matrix[from_node][to_node]
+        return duration_matrix[from_node][to_node]
 
-    transit_callback_index = routing.RegisterTransitCallback(distance_callback)
+    transit_callback_index = routing.RegisterTransitCallback(duration_callback)
     routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
 
     search_parameters = pywrapcp.DefaultRoutingSearchParameters()
@@ -227,16 +268,16 @@ def optimize_route(
 
     ordered_indices: list[int] = []
     index = routing.Start(0)
-    total_distance = 0
 
     while not routing.IsEnd(index):
         node = manager.IndexToNode(index)
         ordered_indices.append(node)
-        previous = index
         index = solution.Value(routing.NextVar(index))
-        total_distance += routing.GetArcCostForVehicle(previous, index, 0)
 
     ordered_indices.append(manager.IndexToNode(index))
+    total_distance, total_duration = _route_leg_totals(
+        ordered_indices, distance_matrix, duration_matrix
+    )
 
     ordered_coordinates = [
         [locations[i].lat, locations[i].lng] for i in ordered_indices
@@ -250,6 +291,8 @@ def optimize_route(
         "ordered_indices": ordered_indices,
         "stop_order": stop_order,
         "total_distance_meters": total_distance,
+        "total_duration_seconds": total_duration,
+        "optimization_metric": "duration",
         "distance_source": "openrouteservice",
         "profile": profile,
     }
@@ -542,8 +585,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument(
         "--time-limit",
         type=int,
-        default=5,
-        help="Solver time limit in seconds (default: 5)",
+        default=DEFAULT_TIME_LIMIT_SECONDS,
+        help=f"Solver time limit in seconds (default: {DEFAULT_TIME_LIMIT_SECONDS})",
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
 

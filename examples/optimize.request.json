@@ -4,20 +4,20 @@
     "address1": "2249 Washington Ave",
     "city": "Bronx",
     "state": "NY",
-    "zipcode": "10451",
+    "zipcode": "10457",
     "location": {
       "type": "Point",
-      "coordinates": [-73.8955, 40.8515]
+      "coordinates": [-73.89406, 40.854388]
     }
   },
   "end": {
     "address1": "2249 Washington Ave",
     "city": "Bronx",
     "state": "NY",
-    "zipcode": "10451",
+    "zipcode": "10457",
     "location": {
       "type": "Point",
-      "coordinates": [-73.8955, 40.8515]
+      "coordinates": [-73.89406, 40.854388]
     }
   },
   "stops": [
@@ -32,15 +32,14 @@
       }
     },
     {
-      "address1": "1101 Forest Ave",
+      "address1": "125 W 228th St",
       "city": "Bronx",
       "state": "NY",
-      "zipcode": "10456",
+      "zipcode": "10463",
       "location": {
         "type": "Point",
         "coordinates": [-73.90774, 40.88467]
       }
     }
-  ],
-  "numRoutes": 2
+  ]
 }
